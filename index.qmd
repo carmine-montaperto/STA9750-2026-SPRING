@@ -19,3 +19,20 @@ Welcome to my STA 9750 course website.
 ## Links
 
 -   GitHub repo: <https://github.com/carmine-montaperto/STA9750-2026-SPRING>
+
+```{r}
+#| include: false
+1+1
+```
+
+------------------------------------------------------------------------
+
+Last Updated: `r format(Sys.time(), "%A %m %d, %Y at %H:%M%p")`
+
+```{r}
+#| include: false
+1+1
+```
+
+--------------
+Last Updated: `r format(Sys.time(), "%A %m %d, %Y at %H:%M%p")`
