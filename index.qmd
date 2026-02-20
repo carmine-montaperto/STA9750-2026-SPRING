@@ -1,0 +1,21 @@
+---
+title: "STA 9750 Mini Project 00"
+author: "Carmine Montaperto"
+format: html
+editor: visual
+---
+
+---
+title: "STA 9750 Mini Project 00"
+author: "Carmine Montaperto"
+---
+
+## About me
+
+Hi! I'm Carmine Montaperto.
+
+Welcome to my STA 9750 course website.
+
+## Links
+
+-   GitHub repo: <https://github.com/carmine-montaperto/STA9750-2026-SPRING>
