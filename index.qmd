@@ -1,0 +1,41 @@
+---
+title: "STA 9750 Mini Project 00"
+author: "Carmine Montaperto"
+format:
+  html:
+    theme: cosmo
+    toc: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+## About me
+
+Hi! I'm Carmine Montaperto.
+
+Welcome to my STA 9750 course website.
+
+## Links
+
+- GitHub repo: <https://github.com/carmine-montaperto/STA9750-2026-SPRING>
+
+## My Location
+
+```{r}
+library(leaflet)
+
+leaflet() |>
+  addTiles() |>
+  addMarkers(
+    lng = -74.0060,
+    lat = 40.7128,
+    popup = "New York City"
+  )
+```
+
+---
+
+Last Updated: `r format(Sys.time(), "%A %m %d, %Y at %H:%M%p")`
+

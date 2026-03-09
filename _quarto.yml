@@ -1,0 +1,12 @@
+project:
+  type: website
+  output-dir: docs
+
+website:
+  title: "STA 9750"
+  site-url: "https://carmine-montaperto.github.io/STA9750-2026-SPRING/"
+
+format:
+  html:
+    theme: cosmo
+    toc: true
