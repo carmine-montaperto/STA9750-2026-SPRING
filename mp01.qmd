@@ -1,0 +1,300 @@
+---
+title: "mp01.qmd"
+author: "carmine montaperto"
+format: html
+editor: visual
+---
+
+---
+title: "Mini Project 01"
+author: "Carmine Montaperto"
+format:
+  html:
+    toc: true
+    code-fold: true
+editor: source
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+This report analyzes institutional diversity trends using IPEDS data in the context of the Supreme Court's 2023 decision in *Students for Fair Admissions v. Harvard*.
+
+## Data Acquisition
+
+```{r}
+library(tidyverse)
+library(gt)
+library(glue)
+
+source("https://michael-weylandt.com/STA9750/load_helpers.R")
+```
+
+```{r}
+acquire_ipeds_data <- function(start_year = 2010, end_year = 2024){
+  library(tidyverse)
+  library(glue)
+
+  data_dir <- file.path("data", "mp01")
+
+  if(!dir.exists(data_dir)){
+    dir.create(data_dir, showWarnings = FALSE, recursive = TRUE)
+  }
+
+  YEARS <- seq(start_year, end_year)
+
+  EFA_ALL <- purrr::map(YEARS, function(yy){
+    if(yy <= 2022){
+      ef_url <- glue("https://nces.ed.gov/ipeds/datacenter/data/EF{yy}A.zip")
+    } else {
+      ef_url <- glue("https://nces.ed.gov/ipeds/data-generator?year={yy}&tableName=EF{yy}A&HasRV=0&type=csv")
+    }
+
+    ef_file <- file.path(data_dir, glue("ef{yy}a.csv.zip"))
+
+    if(!file.exists(ef_file)){
+      message(glue("Downloading Enrollment Data for {yy} from {ef_url}"))
+      download.file(ef_url, destfile = ef_file, quiet = TRUE, mode = "wb")
+    }
+
+    readr::read_csv(
+      ef_file,
+      show_col_types = FALSE
+    ) |>
+      dplyr::mutate(
+        year = yy,
+        enrollment_m_aian = EFAIANM,
+        enrollment_f_aian = EFAIANW,
+        enrollment_m_asia = EFASIAM,
+        enrollment_f_asia = EFASIAW,
+        enrollment_m_bkaa = EFBKAAM,
+        enrollment_f_bkaa = EFBKAAW,
+        enrollment_m_hisp = EFHISPM,
+        enrollment_f_hisp = EFHISPW,
+        enrollment_m_nhpi = EFNHPIM,
+        enrollment_f_nhpi = EFNHPIW,
+        enrollment_m_whit = EFWHITM,
+        enrollment_f_whit = EFWHITW,
+        enrollment_m_2mor = EF2MORM,
+        enrollment_f_2mor = EF2MORW,
+        enrollment_m_unkn = EFUNKNM,
+        enrollment_f_unkn = EFUNKNW,
+        enrollment_m_nral = EFNRALM,
+        enrollment_f_nral = EFNRALW
+      ) |>
+      dplyr::filter(
+        (EFALEVEL %in% c(2, 12)) | (LINE %in% c(1, 15))
+      ) |>
+      dplyr::mutate(
+        level = dplyr::case_when(
+          EFALEVEL == 2 ~ "all undergrad",
+          EFALEVEL == 12 ~ "all graduate",
+          LINE %in% c(1, 15) ~ "first year undergrad"
+        )
+      ) |>
+      dplyr::select(
+        institution_id = UNITID,
+        year,
+        level,
+        dplyr::starts_with("enrollment_")
+      ) |>
+      dplyr::group_by(institution_id, year, level) |>
+      dplyr::summarize(
+        dplyr::across(dplyr::starts_with("enrollment_"), sum),
+        .groups = "drop"
+      )
+  }) |>
+    dplyr::bind_rows()
+
+  DESC_ALL <- purrr::map(YEARS, function(yy){
+    if(yy <= 2022){
+      hd_url <- glue("https://nces.ed.gov/ipeds/datacenter/data/HD{yy}.zip")
+    } else {
+      hd_url <- glue("https://nces.ed.gov/ipeds/data-generator?year={yy}&tableName=HD{yy}&HasRV=0&type=csv")
+    }
+
+    hd_file <- file.path(data_dir, glue("hd{yy}.csv.zip"))
+
+    if(!file.exists(hd_file)){
+      message(glue("Downloading Institutional Descriptions for {yy} from {hd_url}"))
+      download.file(hd_url, destfile = hd_file, quiet = TRUE, mode = "wb")
+    }
+
+    suppressWarnings(
+      readr::read_csv(
+        hd_file,
+        show_col_types = FALSE,
+        locale = readr::locale(
+          encoding = dplyr::if_else(yy == 2024, "utf-8", "windows-1252")
+        )
+      ) |>
+        dplyr::mutate(
+          year = yy,
+          INSTNM = INSTNM
+        ) |>
+        dplyr::select(
+          institution_id = UNITID,
+          institution_name = INSTNM,
+          state = STABBR,
+          year
+        )
+    )
+  }) |>
+    dplyr::bind_rows()
+
+  dplyr::inner_join(
+    EFA_ALL,
+    DESC_ALL,
+    dplyr::join_by(institution_id == institution_id, year == year)
+  )
+}
+```
+
+```{r}
+IPEDS <- acquire_ipeds_data()
+```
+
+## Data Inspection
+
+```{r}
+dim(IPEDS)
+glimpse(IPEDS)
+
+unique(IPEDS$institution_name) |> 
+  stringr::str_subset("Rutgers")
+```
+
+## Data Cleaning and Preparation
+
+```{r}
+rutgers <- IPEDS |> 
+  dplyr::filter(institution_name == "Rutgers University-New Brunswick")
+
+unique(rutgers$level)
+
+range(rutgers$year)
+```
+```{r}
+rutgers_clean <- rutgers |>
+  dplyr::mutate(
+    aian = enrollment_m_aian + enrollment_f_aian,
+    asia = enrollment_m_asia + enrollment_f_asia,
+    black = enrollment_m_bkaa + enrollment_f_bkaa,
+    hisp = enrollment_m_hisp + enrollment_f_hisp,
+    nhpi = enrollment_m_nhpi + enrollment_f_nhpi,
+    white = enrollment_m_whit + enrollment_f_whit,
+    twopl = enrollment_m_2mor + enrollment_f_2mor,
+    unknown = enrollment_m_unkn + enrollment_f_unkn,
+    nonresident = enrollment_m_nral + enrollment_f_nral
+  )
+```
+
+```{r}
+rutgers_clean <- rutgers_clean |>
+  dplyr::mutate(
+    total_students =
+      aian + asia + black + hisp +
+      nhpi + white + twopl +
+      unknown + nonresident
+  )
+```
+
+```{r}
+rutgers_clean <- rutgers_clean |>
+  dplyr::mutate(
+    diversity_count =
+      total_students - (white + asia),
+    diversity_share =
+      diversity_count / total_students
+  )
+```
+
+```{r}
+head(rutgers_clean)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+rutgers_summary <- rutgers_clean |>
+  dplyr::filter(level %in% c("all undergrad", "first year undergrad")) |>
+  dplyr::select(year, level, total_students, diversity_count, diversity_share) |>
+  dplyr::arrange(level, year)
+
+rutgers_summary
+
+rutgers_summary |>
+  dplyr::mutate(
+    diversity_share = scales::percent(diversity_share, accuracy = 0.1)
+  ) |>
+  gt::gt() |>
+  gt::tab_header(
+    title = "Rutgers–New Brunswick Diversity Summary",
+    subtitle = "All undergraduate students and first-year undergraduates by year"
+  ) |>
+  gt::cols_label(
+    year = "Year",
+    level = "Student Group",
+    total_students = "Total Students",
+    diversity_count = "Diversity Count",
+    diversity_share = "Diversity Share"
+  )
+
+rutgers_recent <- rutgers_summary |>
+  dplyr::filter(year %in% c(2023, 2024)) |>
+  dplyr::arrange(level, year)
+
+rutgers_recent
+
+rutgers_recent |>
+  dplyr::mutate(
+    diversity_share = scales::percent(diversity_share, accuracy = 0.1)
+  ) |>
+  gt::gt() |>
+  gt::tab_header(
+    title = "Rutgers–New Brunswick Diversity: 2023 vs 2024",
+    subtitle = "Comparison of undergraduate diversity before and after the SFFA decision"
+  ) |>
+  gt::cols_label(
+    year = "Year",
+    level = "Student Group",
+    total_students = "Total Students",
+    diversity_count = "Diversity Count",
+    diversity_share = "Diversity Share"
+  )
+```
+
+```{r}
+print(rutgers_recent, n = Inf, width = Inf)
+```
+```{r}
+rutgers_trend <- rutgers_summary |>
+  dplyr::mutate(
+    diversity_share_pct = round(diversity_share * 100, 1)
+  )
+
+print(rutgers_trend, n = Inf, width = Inf)
+```
+
+## Op-Ed
+
+The Supreme Court’s 2023 ruling in Students for Fair Admissions v. Harvard ended the use of race-conscious admissions nationwide, raising understandable questions about how universities will maintain diverse learning environments going forward. For institutions like Rutgers, which serve a broad public mission, the decision creates an opportunity to reflect on how we define diversity and how we measure progress over time. While the legal framework around admissions has changed, the broader goal of building inclusive campuses remains an important part of higher education.
+
+To understand how these national changes might intersect with Rutgers’ own trajectory, I examined IPEDS enrollment data for Rutgers–New Brunswick from 2010 through 2024. The dataset includes both all undergraduate students and first-year undergraduates, which makes it possible to compare long-term institutional trends with the more immediate signals that appear in incoming classes. Because IPEDS is publicly reported federal data, it provides a consistent way to track changes in student composition over time.
+
+Looking at the full 2010–2024 period, Rutgers–New Brunswick shows a steady increase in undergraduate diversity. The diversity share for all undergraduates rises from about 25.7% in 2010 to 36.5% in 2024, representing a gradual upward trend over more than a decade. Rather than sudden shifts, the data suggests incremental growth as the university’s student body evolved over time.
+
+The most noticeable change appears in the newest first-year class. First-year diversity increases from 34.5% in 2023 to 38.7% in 2024, a larger jump than the overall undergraduate population’s change from 35.2% to 36.5%. This difference is not surprising, since the freshman class turns over completely each year and reflects admissions outcomes more quickly than the full undergraduate population, which still includes several earlier cohorts. In that sense, the 2024 first-year class may offer an early signal of how Rutgers’ student body could continue to evolve in the coming years.
+
+At the same time, it is important not to over-interpret a single year of data or attribute changes directly to the Supreme Court decision. The early evidence at Rutgers does not show a decline in diversity, and the broader trend remains upward. However, the effects of policy changes often take time to appear, especially as older cohorts graduate and new admissions cycles occur under different rules. Continued observation of enrollment data will therefore be important for understanding how universities adapt to the new legal landscape.
+
+## Conclusion
+
+Rutgers’ enrollment patterns show a clear rise in diversity over the past decade, with both the overall undergraduate population and the newest first-year class continuing that upward trend into 2024. The first year after the SFFA ruling does not show an immediate decline, and the freshman cohort in particular becomes more diverse rather than less. At the same time, a single year of post-decision data is only an early snapshot, and admissions changes often take several cycles to fully appear in enrollment patterns. Continued monitoring will therefore be important as institutions adapt to the new legal landscape and work to maintain broad access and representation.
+
+::: {.callout-note title="AI Usage Statement" collapse="true"}
+ChatGPT was used to assist with debugging R code, understanding output, and organizing the analysis. All interpretations and written responses were reviewed and edited by the author, Carmine Montaperto.
+:::
