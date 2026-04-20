@@ -1,0 +1,211 @@
+peer_feedback_assignment_1:
+  issue_number: 57
+  issue_owner: laurenrichbetch
+  issue_ok: no
+  issue_status: Could not locate your AI Usage Statement - No '.callout-note' block.
+  overall_comments:
+    positive: One notable strength of the submission is the depth of analysis and
+      the effort to explore multiple demographic perspectives. The student goes beyond
+      basic requirements by examining patterns across factors such as age, employment
+      status, and family structure, and provides logical, real-world interpretations
+      of the results.
+    negative: One area for improvement is the overall organization and presentation
+      of the report. The document lacks clear section structure (e.g., labeled tasks),
+      and multiple “WRITE UP” sections appear without clear transitions. Additionally,
+      raw outputs are displayed throughout the document, which makes it feel cluttered
+      and less polished. Improving structure and formatting would make the analysis
+      much easier to follow.
+    advice: To improve the submission, the student could reorganize the report into
+      clearly labeled sections that follow the assignment structure (e.g., Task 1,
+      Task 2, etc.) to improve flow and readability. Additionally, unnecessary raw
+      outputs (such as tibble prints and variable listings) should be hidden, and
+      tables should be formatted using tools like gt() for a more polished presentation.
+      Finally, the AI Usage Statement should be placed in the required .callout-note
+      format to ensure it meets submission guidelines.
+  scores:
+    Written Communication:
+      score: 7.0
+      comment: he writing is generally clear and easy to follow, and the interpretations
+        are logical and understandable. However, the overall structure and organization
+        of the report could be improved. The use of repeated “WRITE UP” sections without
+        clear transitions, along with the inclusion of raw outputs, reduces readability
+        and makes the document feel less polished than it could be.
+    Project Skeleton:
+      score: 7.0
+      comment: The submission includes all required components and completes each
+        task, but the overall structure could be improved. The report does not clearly
+        follow the expected task-based organization, and sections are not consistently
+        labeled, which makes it more difficult to navigate. Adding clear section headers
+        and organizing the content by task would strengthen the project skeleton.
+    Tables & Document Presentation:
+      score: 6.0
+      comment: The submission includes the necessary tables and outputs, but overall
+        presentation could be significantly improved. Many tables are displayed as
+        raw tibble outputs rather than formatted tables, which reduces readability
+        and professionalism. Additionally, the document includes visible intermediate
+        outputs that create visual clutter. Using formatted tables (e.g., with gt())
+        and improving layout consistency would greatly enhance the presentation.
+    Data Visualization:
+      score: 8.0
+      comment: The submission includes a variety of appropriate visualizations that
+        support the analysis and help illustrate key patterns in the data. The chart
+        types are generally well chosen and relevant to the questions being explored.
+        However, the visualizations could be further improved with more polished formatting,
+        clearer titles, and enhanced labeling to improve readability and presentation
+        quality.
+    Exploratory Data Analysis:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Code Quality:
+      score: 9.0
+      comment: The code successfully completes all required tasks and produces the
+        expected outputs. Data manipulation and analysis steps are implemented correctly,
+        and the overall logic is sound. While the code could be improved in terms
+        of organization and output control (e.g., reducing unnecessary printed outputs),
+        it demonstrates a strong understanding of the required techniques.
+    Data Preparation:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Analysis and Findings:
+      score: 8.0
+      comment: The submission demonstrates meaningful analysis and includes several
+        thoughtful interpretations of the results. The student goes beyond simply
+        reporting numbers and attempts to explain why certain patterns may exist across
+        demographic groups. However, the overall presentation and organization make
+        some findings harder to follow, and clearer framing of key results would strengthen
+        the analysis.
+    Extra Credit:
+      score: 0.0
+      comment: While the submission includes additional analysis beyond the core requirements,
+        it does not complete the specified extra credit opportunities outlined in
+        the assignment, such as the relationship diagram or ring visualization. As
+        a result, no formal extra credit criteria appear to have been met.
+  mp_number: 2.0
+peer_feedback_assignment_2:
+  issue_number: 65
+  issue_owner: er0driguez
+  issue_ok: yes
+  issue_status: OK
+  overall_comments:
+    positive: One notable strength of the submission is the overall level of polish
+      and professionalism. The report is exceptionally well-organized, with clear
+      structure, clean formatting, and well-presented tables and visualizations. The
+      use of sourcing and a cohesive narrative framework further strengthens the credibility
+      and readability of the work.
+    negative: One area for improvement would be to further enhance the depth of certain
+      analytical insights. While the interpretations are strong, expanding on the
+      reasoning behind some observed patterns could make the analysis even more impactful.
+    advice: To further improve the submission, the student could expand on key findings
+      by incorporating more detailed explanations or exploring additional comparisons
+      within the data. Additionally, refining visual elements with more customized
+      styling or annotations could elevate the presentation even further.
+  scores:
+    Written Communication:
+      score: 10.0
+      comment: The writing is clear, well-structured, and professional throughout
+        the submission. The report flows logically from one section to the next, and
+        the use of a market research narrative effectively communicates the findings
+        to a non-technical audience. Explanations are thorough and easy to follow,
+        making this a strong example of high-quality written communication.
+    Project Skeleton:
+      score: 10.0
+      comment: The submission follows a clear and well-organized structure that aligns
+        with the assignment requirements. Sections are logically arranged, easy to
+        navigate, and transitions between tasks are smooth. The overall layout contributes
+        to a strong and professional project skeleton.
+    Tables & Document Presentation:
+      score: 10.0
+      comment: The tables and overall document presentation are highly polished and
+        professional. Tables are cleanly formatted, clearly labeled, and include appropriate
+        sourcing, which enhances credibility. The report avoids unnecessary clutter
+        by hiding raw outputs and presents information in a visually appealing and
+        easy-to-read format.
+    Data Visualization:
+      score: 10.0
+      comment: The visualizations are clear, well-designed, and effectively support
+        the analysis. Chart types are appropriately chosen, and labeling enhances
+        readability. The visuals integrate seamlessly into the overall narrative and
+        contribute to a highly polished presentation.
+    Exploratory Data Analysis:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Code Quality:
+      score: 10.0
+      comment: The code successfully completes all required tasks and demonstrates
+        a strong understanding of data manipulation and analysis. Outputs are cleanly
+        managed, and the overall implementation is efficient and well-structured,
+        contributing to a polished final report.
+    Data Preparation:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Analysis and Findings:
+      score: 9.0
+      comment: The analysis is thorough and insightful, with strong interpretations
+        that connect the data to real-world behavior. The use of a market research
+        framing adds depth and coherence to the findings. While the analysis is strong
+        throughout, a slightly deeper exploration of certain results could further
+        enhance the overall impact.
+    Extra Credit:
+      score: 0.0
+      comment: The submission demonstrates strong effort and includes additional analysis
+        beyond the core requirements; however, it does not appear to complete the
+        specific extra credit opportunities outlined in the assignment, such as the
+        relationship diagram or ring visualization.
+  mp_number: 2.0
+peer_feedback_assignment_3:
+  issue_number: 67
+  issue_owner: jalfred259806
+  issue_ok: yes
+  issue_status: OK
+  overall_comments:
+    positive: The submission demonstrates strong effort by completing all required
+      tasks and including additional features such as the ring visualization, which
+      shows initiative beyond the core requirements.
+    negative: Code quality and overall presentation could be improved, as the document
+      includes warnings, repeated code, and unpolished tables that reduce clarity
+      and professionalism.
+    advice: Clean up code by removing warnings and deprecated functions, reduce repetition
+      by organizing code into reusable sections, and improve table formatting using
+      consistent styling tools like gt() to enhance readability and presentation quality.
+  scores:
+    Written Communication:
+      score: 7.0
+      comment: The submission communicates the key ideas clearly and addresses all
+        required questions. The explanations are easy to follow, though adding more
+        depth and refinement to some of the written analysis would further strengthen
+        the overall communication.
+    Project Skeleton:
+      score: 9.0
+      comment: All required sections and tasks are completed and organized logically,
+        though formatting and presentation could be more polished.
+    Tables & Document Presentation:
+      score: 6.0
+      comment: Tables are included but lack consistent formatting and polish, with
+        some outputs appearing cluttered or repetitive rather than cleanly presented.
+    Data Visualization:
+      score: 7.0
+      comment: The visualizations are relevant and clearly support the analysis. Adding
+        more customization and stylistic refinement could further improve their overall
+        presentation and impact.
+    Exploratory Data Analysis:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Code Quality:
+      score: 5.0
+      comment: Code successfully completes the tasks but includes warnings, repetition,
+        and lacks organization, reducing overall clarity and efficiency.
+    Data Preparation:
+      score: 10.0
+      comment: DEFAULT SCORE
+    Analysis and Findings:
+      score: 7.0
+      comment: The analysis answers all questions and provides reasonable interpretations,
+        though insights remain somewhat surface-level and could be more detailed or
+        nuanced.
+    Extra Credit:
+      score: 2.0
+      comment: The submission includes a ring visualization, meeting the extra credit
+        requirement, though the implementation could be further refined.
+  mp_number: 2.0
+evaluator: carmine-montaperto
+

@@ -22,3 +22,5 @@ data/**
 **/gganim*
 /.quarto/
 **/*.quarto_ipynb
+"MP02/data/mp02/" 
+MP02/data/mp02/ 

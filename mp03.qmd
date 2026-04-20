@@ -1,0 +1,1686 @@
+---
+title: "Mini Project 03"
+author: "Carmine Montaperto"
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show the code"
+    embed-resources: true
+    highlight-style: tango
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(httr2)
+library(glue)
+library(gt)
+library(tidycensus)
+library(jsonlite)
+library(scales)
+library(sf)
+```
+
+## Introduction
+
+This report analyzes internal migration patterns within the United States and uses those trends, combined with recent population data, to project state populations through 2030. It then applies the Huntington–Hill apportionment method to estimate how these population changes may translate into congressional representation in the 2032 redistricting cycle.
+
+The analysis combines state population data, state-to-state migration flows, and metro-to-metro migration flows. These data are used both for exploratory analysis and for a forecasting framework focused on the relationship between migration and future political representation.
+
+## Data Acquisition
+
+The combined dataset contains 5,000 state-to-state migration observations across 2023 and 2024, covering all 50 states and enabling a complete view of recent domestic migration patterns.
+
+### Task 1: State Population and Birth Information
+
+This section gathers baseline population data used to measure long-term growth trends across states.
+
+```{r}
+#| label: create-mp03-directory
+
+if (!dir.exists("data/mp03")) {
+  dir.create("data/mp03", recursive = TRUE)
+}
+```
+
+```{r}
+#| label: state-population-data
+
+options(tigris_use_cache = TRUE)
+
+years <- 2015:2024
+
+state_abbrev_lookup <- c(
+  setNames(state.abb, state.name),
+  "District of Columbia" = "DC",
+  "Puerto Rico" = "PR"
+)
+
+state_population_raw <- purrr::map_dfr(
+  years,
+  function(yr) {
+    survey_type <- if_else(yr == 2020, "acs5", "acs1")
+
+    get_acs(
+      geography = "state",
+      variables = c(total_population = "B01003_001"),
+      year = yr,
+      survey = survey_type,
+      geometry = TRUE,
+      cache_table = TRUE
+    ) |>
+      mutate(year = yr, survey_used = survey_type)
+  }
+)
+
+state_population <- state_population_raw |>
+  transmute(
+    total_population = estimate,
+    state_name = NAME,
+    state_abbrev = recode(NAME, !!!state_abbrev_lookup),
+    year = year,
+    survey_used = survey_used,
+    geometry = geometry
+  ) |>
+  arrange(year, state_name)
+```
+
+### Task 2: State-to-State Migration Flows Functions
+
+This section defines functions to extract and standardize state-to-state migration flow data.
+
+```{r}
+#| label: state-migration-functions
+
+state_name_to_abbrev <- c(
+  setNames(state.abb, state.name),
+  "District of Columbia" = "DC"
+)
+
+state_to_state_migration_2024 <- function() {
+
+  if (!dir.exists("data/mp03")) {
+    dir.create("data/mp03", recursive = TRUE)
+  }
+
+  file_2024 <- "data/mp03/State_to_State_Migration_Table_2024_T13.xlsx"
+  url_2024  <- "https://www2.census.gov/programs-surveys/demo/tables/geographic-mobility/2024/state-to-state-migration/State_to_State_Migration_Table_2024_T13.xlsx"
+
+  if (!file.exists(file_2024)) {
+    download.file(url = url_2024, destfile = file_2024, mode = "wb")
+  }
+
+  flows_2024 <- read_excel(
+    file_2024,
+    sheet = "Table",
+    skip = 8,
+    col_names = c("state_current", "state_1y", "population", "moe")
+  ) |>
+    select(state_current, state_1y, population) |>
+    mutate(
+      state_current = trimws(state_current),
+      state_1y = trimws(state_1y)
+    ) |>
+    filter(
+      state_current %in% state.name,
+      state_1y %in% c(state.name, "District of Columbia"),
+      population != "X"
+    ) |>
+    mutate(
+      population = if_else(population == "N", "0", as.character(population)),
+      population = as.integer(population),
+      state_current = recode(state_current, !!!state_name_to_abbrev),
+      state_1y = recode(state_1y, !!!state_name_to_abbrev),
+      year_current = 2024L,
+      year_1y = 2023L
+    ) |>
+    filter(state_1y != "DC")
+
+  same_state_2024 <- read_excel(
+    file_2024,
+    sheet = "Supplemental - Current Res",
+    skip = 10,
+    col_names = FALSE
+  ) |>
+    setNames(c(
+      "state_current",
+      "pop_total", "pop_total_moe",
+      "same_residence", "same_residence_moe",
+      "within_state_movers", "within_state_movers_moe",
+      "different_state_movers", "different_state_movers_moe",
+      "from_abroad", "from_abroad_moe"
+    )) |>
+    mutate(state_current = trimws(state_current)) |>
+    filter(state_current %in% state.name) |>
+    transmute(
+      state_current = recode(state_current, !!!state_name_to_abbrev),
+      state_1y = state_current,
+      population = as.integer(same_residence + within_state_movers),
+      year_current = 2024L,
+      year_1y = 2023L
+    )
+
+  bind_rows(flows_2024, same_state_2024) |>
+    arrange(state_current, state_1y)
+}
+
+
+state_to_state_migration_2023 <- function() {
+
+  if (!dir.exists("data/mp03")) {
+    dir.create("data/mp03", recursive = TRUE)
+  }
+
+  file_2023 <- "data/mp03/State_to_State_Migration_Table_2023_T13.xlsx"
+  url_2023  <- "https://www2.census.gov/programs-surveys/demo/tables/geographic-mobility/2023/state-to-state-migration/State_to_State_Migration_Table_2023_T13.xlsx"
+
+  if (!file.exists(file_2023)) {
+    download.file(url = url_2023, destfile = file_2023, mode = "wb")
+  }
+
+  table_2023_raw <- read_excel(
+    file_2023,
+    sheet = "Table",
+    skip = 11,
+    col_names = FALSE
+  )
+
+  names(table_2023_raw) <- paste0("col", seq_len(ncol(table_2023_raw)))
+
+  origin_names_2023 <- append(
+    state.name,
+    "District of Columbia",
+    after = which(state.name == "Delaware")
+  )
+
+  origin_positions_2023 <- seq(10, 110, by = 2)
+
+  interstate_2023 <- table_2023_raw |>
+    filter(col1 %in% state.name) |>
+    select(all_of(c("col1", paste0("col", origin_positions_2023)))) |>
+    setNames(c("state_current", origin_names_2023)) |>
+    pivot_longer(
+      cols = -state_current,
+      names_to = "state_1y",
+      values_to = "population"
+    ) |>
+    mutate(
+      state_current = trimws(state_current),
+      state_1y = trimws(state_1y),
+      population = as.character(population),
+      population = if_else(population %in% c("N", "N/A"), "0", population),
+      population = as.integer(population),
+      state_current = recode(state_current, !!!state_name_to_abbrev),
+      state_1y = recode(state_1y, !!!state_name_to_abbrev),
+      year_current = 2023L,
+      year_1y = 2022L
+    ) |>
+    filter(
+      state_1y != state_current,
+      state_1y != "DC"
+    )
+
+  same_state_2023 <- table_2023_raw |>
+    filter(col1 %in% state.name) |>
+    transmute(
+      state_current = recode(trimws(col1), !!!state_name_to_abbrev),
+      state_1y = state_current,
+      population = as.integer(col4 + col6),
+      year_current = 2023L,
+      year_1y = 2022L
+    )
+
+  bind_rows(interstate_2023, same_state_2023) |>
+    arrange(state_current, state_1y)
+}
+```
+
+### Task 3: Combine State-to-State Migration Flows
+
+This step combines multiple years of migration data into a unified dataset for analysis.
+
+```{r}
+#| label: combined-state-migration
+
+m2024 <- state_to_state_migration_2024()
+m2023 <- state_to_state_migration_2023()
+
+state_migration <- bind_rows(m2024, m2023) |>
+  arrange(desc(year_current), state_current, state_1y)
+```
+
+### Task 4: Initial State Migration Quality Checks
+
+Initial quality checks confirm that migration data is complete, balanced, and consistent across states and years.
+
+```{r}
+#| label: state-migration-checks
+
+task4_year_counts <- state_migration |>
+  count(year_current)
+
+task4_state_counts <- state_migration |>
+  count(year_current, state_current)
+
+task4_al_al <- state_migration |>
+  filter(state_current == "AL", state_1y == "AL")
+
+task4_al_ak <- state_migration |>
+  filter(state_current == "AL", state_1y == "AK")
+
+task4_year_counts |>
+  gt() |>
+  cols_label(
+    year_current = "Current Year",
+    n = "Rows"
+  ) |>
+  tab_header(
+    title = "State Migration Rows by Year"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+task4_state_counts |>
+  gt() |>
+  cols_label(
+    year_current = "Current Year",
+    state_current = "State",
+    n = "Rows"
+  ) |>
+  tab_header(
+    title = "Rows per State by Year"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+task4_al_al |>
+  gt() |>
+  cols_label(
+    state_current = "Current State",
+    state_1y = "Prior-Year State",
+    population = "Population",
+    year_current = "Current Year",
+    year_1y = "Prior Year"
+  ) |>
+  tab_header(
+    title = "Validation Check: Alabama to Alabama"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+task4_al_ak |>
+  gt() |>
+  cols_label(
+    state_current = "Current State",
+    state_1y = "Prior-Year State",
+    population = "Population",
+    year_current = "Current Year",
+    year_1y = "Prior Year"
+  ) |>
+  tab_header(
+    title = "Validation Check: Alaska to Alabama Flow"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+```
+
+### Task 5: Metro-to-Metro Migration Flows
+
+```{r}
+#| label: metro-migration-function
+
+move_row_to_colnames <- function(X, row = 1) {
+  X <- as.data.frame(X, stringsAsFactors = FALSE)
+  Xrow <- X[row, , drop = FALSE]
+  X <- X[-row, , drop = FALSE]
+  colnames(X) <- unlist(Xrow[1, ])
+  X <- tibble::as_tibble(X)
+  readr::type_convert(X)
+}
+
+pull_state_from_metro <- function(metro_name) {
+  stringr::str_extract(
+    metro_name,
+    ".*, (\\S{2})[-[:alpha:]]* Metro Area",
+    group = 1
+  )
+}
+
+metro_to_metro_migration <- function() {
+
+  if (!dir.exists("data/mp03")) {
+    dir.create("data/mp03", recursive = TRUE)
+  }
+
+  metro_json_file <- "data/mp03/metro_to_metro_migration_2023.json"
+
+  metro_url <- paste0(
+    "https://api.census.gov/data/2020/acs/flows?",
+    "get=MOVEDIN,MOVEDOUT,FULL1_NAME,FULL2_NAME",
+    "&for=metropolitan%20statistical%20area/micropolitan%20statistical%20area:*"
+  )
+
+  if (!file.exists(metro_json_file)) {
+    download.file(
+      url = metro_url,
+      destfile = metro_json_file,
+      mode = "wb"
+    )
+  }
+
+  metro_raw <- jsonlite::fromJSON(metro_json_file)
+
+  metro_clean <- move_row_to_colnames(metro_raw) |>
+    transmute(
+      metro_from = FULL2_NAME,
+      metro_to = FULL1_NAME,
+      moved_in = MOVEDIN,
+      moved_out = MOVEDOUT
+    ) |>
+    mutate(
+      metro_to_state = pull_state_from_metro(metro_to),
+      metro_from_state = pull_state_from_metro(metro_from)
+    )
+
+  metro_clean
+}
+```
+
+```{r}
+#| label: metro-migration-data
+
+metro_migration <- metro_to_metro_migration()
+```
+
+## Data Cleaning and Preparation
+
+```{r}
+#| label: cleaned-data-objects
+
+state_population_clean <- state_population |>
+  st_drop_geometry() |>
+  arrange(year, state_abbrev)
+
+state_migration_clean <- state_migration |>
+  arrange(desc(year_current), state_current, state_1y)
+
+metro_migration_clean <- metro_migration |>
+  mutate(
+    moved_in = replace_na(moved_in, 0),
+    moved_out = replace_na(moved_out, 0)
+  ) |>
+  arrange(metro_to, metro_from)
+```
+
+## Question 1: Which states have had the highest net population growth rates over the past decade?
+
+```{r}
+#| label: growth-rates-by-state
+
+growth_rates <- state_population |>
+  sf::st_drop_geometry() |>
+  group_by(state_name, state_abbrev) |>
+  summarise(
+    population_start = total_population[year == min(year)],
+    year_start = min(year),
+    population_end = total_population[year == max(year)],
+    year_end = max(year),
+    .groups = "drop"
+  ) |>
+  mutate(
+    absolute_growth = population_end - population_start,
+    pct_growth = (population_end - population_start) / population_start
+  ) |>
+  arrange(desc(pct_growth))
+
+growth_rates |>
+  slice_head(n = 10) |>
+  mutate(
+    pct_growth = scales::percent(pct_growth, accuracy = 0.1),
+    population_start = scales::comma(population_start),
+    population_end = scales::comma(population_end),
+    absolute_growth = scales::comma(absolute_growth)
+  ) |>
+  gt() |>
+  cols_label(
+    state_name = "State",
+    state_abbrev = "Abbrev.",
+    year_start = "Start Year",
+    population_start = "Start Population",
+    year_end = "End Year",
+    population_end = "End Population",
+    absolute_growth = "Absolute Growth",
+    pct_growth = "Percent Growth"
+  ) |>
+  tab_header(
+    title = "Top 10 States by Population Growth Rate"
+  )
+```
+
+The states with the highest population growth rates over the past decade are primarily located in the South and Mountain West regions. Idaho leads with a growth rate of approximately 20.9%, followed by Utah (16.9%), Florida (15.3%), and Texas (13.9%).
+
+These results reflect ongoing population shifts toward states with lower costs of living, warmer climates, and strong economic growth. Much of this growth is driven by domestic migration from higher‑cost states in the Northeast and West Coast.
+
+Overall, population growth in the U.S. appears to be concentrated in fast-growing Sun Belt and interior states, while slower growth is observed in more mature or high-cost regions.
+
+```{r}
+#| label: growth-rates-plot
+
+growth_rates |>
+  slice_head(n = 10) |>
+  mutate(
+    state_name = forcats::fct_reorder(state_name, pct_growth)
+  ) |>
+  ggplot(aes(x = pct_growth, y = state_name)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "States with the Highest Population Growth Rates",
+    subtitle = "Comparison of earliest and latest available years in ACS data",
+    x = "Population Growth Rate",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+## Question 2: For New York State, where do movers come from and where do they go?
+
+```{r}
+#| label: nys-in-out-migration
+
+nys_inbound <- state_migration_clean |>
+  filter(state_current == "NY", state_1y != "NY") |>
+  group_by(state_1y) |>
+  summarise(
+    inbound_population = sum(population),
+    .groups = "drop"
+  ) |>
+  arrange(desc(inbound_population))
+
+nys_outbound <- state_migration_clean |>
+  filter(state_1y == "NY", state_current != "NY") |>
+  group_by(state_current) |>
+  summarise(
+    outbound_population = sum(population),
+    .groups = "drop"
+  ) |>
+  arrange(desc(outbound_population))
+
+nys_inbound |>
+  slice_head(n = 10) |>
+  mutate(inbound_population = scales::comma(inbound_population)) |>
+  gt() |>
+  cols_label(
+    state_1y = "Origin State",
+    inbound_population = "People Moving Into NY"
+  ) |>
+  tab_header(
+    title = "Top States Sending Movers Into New York"
+  )
+
+nys_outbound |>
+  slice_head(n = 10) |>
+  mutate(outbound_population = scales::comma(outbound_population)) |>
+  gt() |>
+  cols_label(
+    state_current = "Destination State",
+    outbound_population = "People Leaving NY For State"
+  ) |>
+  tab_header(
+    title = "Top States Receiving Movers From New York"
+  )
+```
+
+```{r}
+#| label: nys-in-out-migration-plot
+
+bind_rows(
+  nys_inbound |>
+    slice_head(n = 10) |>
+    transmute(state = state_1y, people = inbound_population, flow = "Inbound to NY"),
+  nys_outbound |>
+    slice_head(n = 10) |>
+    transmute(state = state_current, people = outbound_population, flow = "Outbound from NY")
+) |>
+  ggplot(aes(x = people, y = forcats::fct_reorder(state, people), fill = flow)) +
+  geom_col() +
+  facet_wrap(~ flow, scales = "free_y") +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Interstate Migration Flows Connected to New York",
+    x = "Number of People",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+These results show that New York’s migration patterns are shaped by both regional proximity and broader redistribution trends. Strong inflows from nearby states such as New Jersey and Pennsylvania reflect localized mobility within the Northeast, while significant outflows to states like Florida and Texas indicate longer-distance relocation patterns toward high-growth regions.
+
+This combination highlights New York’s role as both a regional hub and a source of outbound migration, as residents relocate in search of lower costs, different lifestyles, and expanding economic opportunities across other parts of the country.
+
+## Question 3: For New York City, where do movers come from and where do they go?
+
+```{r}
+#| label: nyc-metro-in-out-migration
+
+nyc_metro_name <- metro_migration_clean |>
+  distinct(metro_to) |>
+  filter(str_detect(metro_to, "^New York-Newark-Jersey City")) |>
+  pull(metro_to)
+
+nyc_inbound_metros <- metro_migration_clean |>
+  filter(
+    metro_to == nyc_metro_name,
+    !is.na(metro_from_state),
+    metro_from != metro_to
+  ) |>
+  select(metro_from, moved_in) |>
+  arrange(desc(moved_in))
+
+nyc_outbound_metros <- metro_migration_clean |>
+  filter(
+    metro_to == nyc_metro_name,
+    !is.na(metro_from_state),
+    metro_from != metro_to
+  ) |>
+  select(metro_from, moved_out) |>
+  arrange(desc(moved_out))
+
+nyc_inbound_metros |>
+  slice_head(n = 10) |>
+  mutate(moved_in = scales::comma(moved_in)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Origin Metro Area",
+    moved_in = "People Moving Into NYC Metro"
+  ) |>
+  tab_header(
+    title = "Top Metro Areas Sending Movers Into the New York City Metro"
+  )
+
+nyc_outbound_metros |>
+  slice_head(n = 10) |>
+  mutate(moved_out = scales::comma(moved_out)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Destination Metro Area",
+    moved_out = "People Leaving NYC Metro For Area"
+  ) |>
+  tab_header(
+    title = "Top Metro Areas Receiving Movers From the New York City Metro"
+  )
+```
+
+```{r}
+#| label: nyc-metro-in-out-migration-plot
+
+bind_rows(
+  nyc_inbound_metros |>
+    slice_head(n = 10) |>
+    transmute(metro = metro_from, people = moved_in, flow = "Inbound to NYC Metro"),
+  nyc_outbound_metros |>
+    slice_head(n = 10) |>
+    transmute(metro = metro_from, people = moved_out, flow = "Outbound from NYC Metro")
+) |>
+  ggplot(aes(x = people, y = forcats::fct_reorder(metro, people), fill = flow)) +
+  geom_col() +
+  facet_wrap(~ flow, scales = "free_y") +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Metro-to-Metro Migration Flows Connected to the New York City Metro",
+    x = "Number of People",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+The metro-level migration pattern connected to the New York City metro area shows where its strongest regional and national relocation ties are concentrated. The inbound table highlights the metro areas contributing the largest inflows into New York City’s broader metropolitan region, while the outbound table identifies the metro destinations attracting the most former NYC metro residents.
+
+The metro‑level flows reveal that New York City’s strongest migration ties are with nearby Northeast metros and several large Sun Belt metros. These patterns highlight both regional mobility and long‑distance moves driven by economic opportunity, cost of living, and lifestyle preferences.
+
+These results help distinguish New York City’s migration relationships at a finer geographic level than the state analysis. They are especially useful for understanding whether the metro area is most closely connected to nearby East Coast metros, large Sun Belt metros, or a wider national set of urban destinations.
+
+## Question 4: Which states have the highest  in-migration, out-migration, and net migration?
+
+```{r}
+#| label: state-migration-summary
+
+state_inbound <- state_migration_clean |>
+  filter(state_current != state_1y) |>
+  group_by(state_current) |>
+  summarise(
+    inbound_population = sum(population),
+    .groups = "drop"
+  ) |>
+  rename(state = state_current)
+
+state_outbound <- state_migration_clean |>
+  filter(state_current != state_1y) |>
+  group_by(state_1y) |>
+  summarise(
+    outbound_population = sum(population),
+    .groups = "drop"
+  ) |>
+  rename(state = state_1y)
+
+state_migration_summary <- state_inbound |>
+  full_join(state_outbound, by = "state") |>
+  mutate(
+    inbound_population = replace_na(inbound_population, 0),
+    outbound_population = replace_na(outbound_population, 0),
+    net_migration = inbound_population - outbound_population
+  ) |>
+  arrange(desc(net_migration))
+
+# ---- Top Inbound ----
+top_inbound <- state_migration_summary |>
+  arrange(desc(inbound_population)) |>
+  slice_head(n = 10) |>
+  mutate(
+    inbound_population = scales::comma(inbound_population),
+    outbound_population = scales::comma(outbound_population),
+    net_migration = scales::comma(net_migration)
+  ) |>
+  gt() |>
+  cols_label(
+    state = "State",
+    inbound_population = "Inbound Migration",
+    outbound_population = "Outbound Migration",
+    net_migration = "Net Migration"
+  ) |>
+  tab_header(
+    title = "Top 10 States by In-Migration"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  )
+
+# ---- Top Outbound ----
+top_outbound <- state_migration_summary |>
+  arrange(desc(outbound_population)) |>
+  slice_head(n = 10) |>
+  mutate(
+    inbound_population = scales::comma(inbound_population),
+    outbound_population = scales::comma(outbound_population),
+    net_migration = scales::comma(net_migration)
+  ) |>
+  gt() |>
+  cols_label(
+    state = "State",
+    inbound_population = "Inbound Migration",
+    outbound_population = "Outbound Migration",
+    net_migration = "Net Migration"
+  ) |>
+  tab_header(
+    title = "Top 10 States by Out-Migration"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  )
+
+# ---- Top Net Migration ----
+top_net <- state_migration_summary |>
+  arrange(desc(net_migration)) |>
+  slice_head(n = 10) |>
+  mutate(
+    inbound_population = scales::comma(inbound_population),
+    outbound_population = scales::comma(outbound_population),
+    net_migration = scales::comma(net_migration)
+  ) |>
+  gt() |>
+  cols_label(
+    state = "State",
+    inbound_population = "Inbound Migration",
+    outbound_population = "Outbound Migration",
+    net_migration = "Net Migration"
+  ) |>
+  tab_header(
+    title = "Top 10 States by Net Migration"
+  ) |>
+  tab_options(
+    table.font.size = px(12),
+    data_row.padding = px(4)
+  ) |>
+  cols_align(
+    align = "center",
+    columns = everything()
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_column_labels(everything())
+  )
+
+top_inbound
+top_outbound
+top_net
+```
+
+```{r}
+#| label: state-net-migration-plot
+
+state_migration_summary |>
+  arrange(desc(net_migration)) |>
+  slice_head(n = 10) |>
+  mutate(
+    state = forcats::fct_reorder(state, net_migration)
+  ) |>
+  ggplot(aes(x = net_migration, y = state)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top States by Net Migration",
+    x = "Net Migration",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+Net migration provides the clearest measure of whether a state is gaining or losing residents after accounting for both inflows and outflows. States such as Texas and Florida lead in inbound migration, while states like California and New York experience the highest outbound flows, reflecting population redistribution across regions.
+
+Net migration results show a strong concentration of gains in the South and Sun Belt, with states in these regions consistently experiencing positive net inflows. In contrast, several Northeastern and West Coast states exhibit net population losses, driven by sustained outbound migration. These patterns reinforce a broader national shift toward lower-cost, high-growth regions, where economic opportunity, affordability, and quality of life are attracting new residents.
+
+## Extra Credit: Spatial Visualization of Net Migration
+
+```{r}
+#| label: net-migration-map
+
+state_map_data <- state_population |>
+  filter(year == 2024) |>
+  left_join(
+    state_migration_summary,
+    by = c("state_abbrev" = "state")
+  )
+
+state_map_data |>
+  ggplot() +
+  geom_sf(aes(fill = net_migration), color = "white", linewidth = 0.2) +
+  scale_fill_gradient2(
+    low = "#d73027",
+    mid = "white",
+    high = "#1a9850",
+    midpoint = 0,
+    labels = scales::comma
+  ) +
+  labs(
+    title = "Net Migration by State",
+    fill = "Net Migration"
+  ) +
+  theme_minimal()
+```
+
+This spatial visualization highlights regional migration patterns across the United States. States in the South and Sun Belt, particularly Texas and Florida, show strong positive net migration, while several Northeastern and West Coast states exhibit net outflows. The geographic clustering of these trends reinforces the broader shift toward lower-cost, high-growth regions.
+
+## Question 5: Which states gain or lose the highest share of their population through migration?
+
+```{r}
+#| label: migration-as-share-of-population
+
+latest_population <- state_population_clean |>
+  filter(year == max(year)) |>
+  select(state_abbrev, total_population)
+
+migration_share_summary <- state_migration_summary |>
+  left_join(
+    latest_population,
+    by = c("state" = "state_abbrev")
+  ) |>
+  mutate(
+    inbound_share = inbound_population / total_population,
+    outbound_share = outbound_population / total_population,
+    net_share = net_migration / total_population
+  ) |>
+  arrange(desc(net_share))
+
+top_net_share <- migration_share_summary |>
+  arrange(desc(net_share)) |>
+  slice_head(n = 10) |>
+  mutate(
+    inbound_share = scales::percent(inbound_share, accuracy = 0.1),
+    outbound_share = scales::percent(outbound_share, accuracy = 0.1),
+    net_share = scales::percent(net_share, accuracy = 0.1),
+    total_population = scales::comma(total_population)
+  ) |>
+  gt() |>
+  cols_label(
+    state = "State",
+    total_population = "Population",
+    inbound_share = "Inbound Share",
+    outbound_share = "Outbound Share",
+    net_share = "Net Share"
+  ) |>
+  tab_header(
+    title = "Top 10 States by Net Migration Share of Population"
+  )
+
+bottom_net_share <- migration_share_summary |>
+  arrange(net_share) |>
+  slice_head(n = 10) |>
+  mutate(
+    inbound_share = scales::percent(inbound_share, accuracy = 0.1),
+    outbound_share = scales::percent(outbound_share, accuracy = 0.1),
+    net_share = scales::percent(net_share, accuracy = 0.1),
+    total_population = scales::comma(total_population)
+  ) |>
+  gt() |>
+  cols_label(
+    state = "State",
+    total_population = "Population",
+    inbound_share = "Inbound Share",
+    outbound_share = "Outbound Share",
+    net_share = "Net Share"
+  ) |>
+  tab_header(
+    title = "Bottom 10 States by Net Migration Share of Population"
+  )
+
+top_net_share
+bottom_net_share
+```
+
+```{r}
+#| label: migration-share-plot
+
+migration_share_summary |>
+  arrange(desc(net_share)) |>
+  slice_head(n = 10) |>
+  mutate(
+    state = forcats::fct_reorder(state, net_share)
+  ) |>
+  ggplot(aes(x = net_share, y = state)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  labs(
+    title = "Top States by Net Migration Share of Population",
+    x = "Net Migration Share",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+Examining migration relative to population size provides a more balanced view of migration pressure. While large states dominate total inflows and outflows, migration shares highlight where population change is most impactful. Smaller and fast‑growing states often experience the strongest proportional effects, even when absolute flows are moderate.
+
+This perspective helps identify states where migration is having an outsized demographic impact. It is especially useful for comparing smaller fast-growing states against larger states where even substantial migration totals may represent a smaller share of the population.
+
+This highlights that migration pressure is often more intense in smaller or fast-growing states, where even moderate inflows can significantly impact overall population dynamics.
+
+## Question 6: What are the largest interstate migration corridors?
+
+```{r}
+#| label: interstate-corridors
+
+interstate_corridors <- state_migration_clean |>
+  filter(state_current != state_1y) |>
+  group_by(state_1y, state_current) |>
+  summarise(
+    total_flow = sum(population),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total_flow))
+
+top_corridors <- interstate_corridors |>
+  slice_head(n = 15) |>
+  mutate(
+    total_flow = scales::comma(total_flow)
+  ) |>
+  gt() |>
+  cols_label(
+    state_1y = "Origin State",
+    state_current = "Destination State",
+    total_flow = "Migration Flow"
+  ) |>
+  tab_header(
+    title = "Largest Interstate Migration Corridors"
+  )
+
+top_corridors
+```
+
+```{r}
+#| label: interstate-corridors-plot
+
+interstate_corridors |>
+  slice_head(n = 10) |>
+  mutate(
+    corridor = paste(state_1y, "→", state_current),
+    corridor = forcats::fct_reorder(corridor, total_flow)
+  ) |>
+  ggplot(aes(x = total_flow, y = corridor)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Interstate Migration Corridors",
+    x = "Number of People",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+Interstate migration corridors highlight the strongest direct population movements between pairs of states. Unlike aggregate migration measures, these corridors reveal the specific geographic relationships that drive population redistribution across the country.
+
+The largest corridors tend to involve major population centers and common relocation pathways, such as movements from high-cost states to lower-cost or high-growth states. These flows often reflect economic opportunities, housing affordability, and regional migration patterns that shape broader demographic trends.
+
+These corridors show that a relatively small number of state‑to‑state pathways account for a large share of total movement, reflecting concentrated geographic and economic relationships.
+
+## Question 7: What are the largest metro-to-metro migration corridors?
+
+```{r}
+#| label: metro-corridors
+
+metro_corridors <- metro_migration_clean |>
+  filter(
+    !is.na(metro_from_state),
+    metro_from != metro_to
+  ) |>
+  group_by(metro_from, metro_to) |>
+  summarise(
+    total_flow = sum(moved_in),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total_flow))
+
+top_metro_corridors <- metro_corridors |>
+  slice_head(n = 15) |>
+  mutate(
+    total_flow = scales::comma(total_flow)
+  ) |>
+  gt() |>
+  cols_label(
+    metro_from = "Origin Metro",
+    metro_to = "Destination Metro",
+    total_flow = "Migration Flow"
+  ) |>
+  tab_header(
+    title = "Largest Metro-to-Metro Migration Corridors"
+  )
+
+top_metro_corridors
+```
+
+```{r}
+#| label: metro-corridors-plot
+
+metro_corridors |>
+  slice_head(n = 10) |>
+  mutate(
+    corridor = paste(metro_from, "→", metro_to),
+    corridor = forcats::fct_reorder(corridor, total_flow)
+  ) |>
+  ggplot(aes(x = total_flow, y = corridor)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Metro-to-Metro Migration Corridors",
+    x = "Number of People",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+Metro-to-metro migration corridors provide a more detailed view of population movement patterns than state-level flows. These corridors highlight the strongest connections between specific urban areas, revealing how individuals relocate between major metropolitan regions.
+
+The largest metro corridors often reflect economic linkages, geographic proximity, and common relocation patterns such as moves between large coastal cities and fast-growing Sun Belt metros. These flows provide deeper insight into the urban dynamics driving broader migration trends.
+
+These metro‑to‑metro flows show that migration patterns are shaped not only by state‑level trends but also by strong economic and geographic linkages between specific metropolitan areas.
+
+## Question 8: What metro areas are most connected to New York State’s largest metro?
+
+```{r}
+#| label: nyc-metro-connections
+
+nyc_connections <- metro_migration_clean |>
+  filter(
+    metro_to == nyc_metro_name,
+    !is.na(metro_from_state),
+    metro_from != metro_to
+  ) |>
+  group_by(metro_from) |>
+  summarise(
+    total_connection = sum(moved_in, na.rm = TRUE) +
+                       sum(moved_out, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(total_connection))
+
+nyc_connections |>
+  slice_head(n = 15) |>
+  mutate(total_connection = scales::comma(total_connection)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Connected Metro Area",
+    total_connection = "Total Migration Connection"
+  ) |>
+  tab_header(
+    title = "Metro Areas Most Connected to the New York City Metro"
+  )
+```
+
+```{r}
+#| label: q8-nyc-metro-connections-plot
+
+nyc_connections |>
+  slice_head(n = 10) |>
+  mutate(
+    metro_from = forcats::fct_reorder(metro_from, total_connection)
+  ) |>
+  ggplot(aes(x = total_connection, y = metro_from)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Metro Areas Connected to NYC Metro",
+    x = "Total Migration Flow (In + Out)",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+The metro areas most connected to the New York City metro reflect the strongest two-way migration relationships. By combining both inbound and outbound flows, this measure captures the total level of interaction between NYC and other metropolitan regions.
+
+These connections are often strongest with nearby metros in the Northeast, as well as large and rapidly growing metros in the Sun Belt. This suggests that New York City maintains both regional ties and broader national migration relationships, particularly with areas that offer different economic and lifestyle opportunities.
+
+These connections reflect a combination of geographic proximity, shared labor markets, and established relocation pathways between major coastal metros and fast‑growing Sun Belt regions.
+
+## Question 9: Which outside metro areas send the most people into New York’s largest metro, and receive the most from it?
+
+```{r}
+#| label: nyc-external-flows
+
+nyc_inbound_metros |>
+  slice_head(n = 10) |>
+  mutate(moved_in = scales::comma(moved_in)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Metro Sending People to NYC",
+    moved_in = "People Moving Into NYC Metro"
+  ) |>
+  tab_header(
+    title = "Top Metro Areas Sending People Into NYC Metro"
+  )
+
+nyc_outbound_metros |>
+  slice_head(n = 10) |>
+  mutate(moved_out = scales::comma(moved_out)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Metro Receiving People From NYC",
+    moved_out = "People Leaving NYC Metro"
+  ) |>
+  tab_header(
+    title = "Top Metro Areas Receiving People From NYC Metro"
+  )
+```
+
+```{r}
+#| label: q9-nyc-external-flows-plot
+
+bind_rows(
+  nyc_inbound_metros |>
+    slice_head(n = 10) |>
+    transmute(metro = metro_from, people = moved_in, flow = "Inbound"),
+  nyc_outbound_metros |>
+    slice_head(n = 10) |>
+    transmute(metro = metro_from, people = moved_out, flow = "Outbound")
+) |>
+  ggplot(aes(x = people, y = forcats::fct_reorder(metro, people), fill = flow)) +
+  geom_col() +
+  facet_wrap(~ flow, scales = "free_y") +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top External Metro Flows for NYC Metro",
+    x = "Number of People",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+The directional metro flows for New York City highlight the most significant external sources of population inflow and the primary destinations for out-migration. By separating inbound and outbound flows, this analysis reveals asymmetries in migration patterns that are not visible when looking only at total connections.
+
+Inbound flows often reflect strong economic or cultural ties that draw individuals into the NYC metro, while outbound flows indicate where residents are relocating, often in search of lower costs of living, different job opportunities, or lifestyle changes. Together, these patterns help identify the metro areas most actively exchanging population with New York City.
+
+## Question 10: Are there metro areas with especially strong ties to New York City?
+
+```{r}
+#| label: nyc-strong-ties
+
+nyc_strong_ties <- nyc_connections |>
+  slice_head(n = 10) |>
+  mutate(total_connection = scales::comma(total_connection)) |>
+  gt() |>
+  cols_label(
+    metro_from = "Metro Area",
+    total_connection = "Total Migration Connection"
+  ) |>
+  tab_header(
+    title = "Metro Areas with the Strongest Migration Ties to NYC"
+  )
+
+nyc_strong_ties
+```
+
+```{r}
+#| label: q10-nyc-strong-ties-plot
+
+nyc_connections |>
+  slice_head(n = 10) |>
+  mutate(
+    metro_from = forcats::fct_reorder(metro_from, total_connection)
+  ) |>
+  ggplot(aes(x = total_connection, y = metro_from)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(
+    title = "Top Metro Areas Connected to NYC Metro",
+    x = "Total Migration Flow (In + Out)",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+The metro areas with the strongest ties to New York City are those that consistently appear across inbound, outbound, and total migration connection rankings. These metros represent the most active two-way migration relationships, indicating sustained population exchange rather than one-sided movement.
+
+Many of these strongly connected metros are either geographically close to New York City, such as other Northeastern urban areas, or are major national destinations, particularly in the Sun Belt. This suggests that New York City’s migration network is shaped by both regional proximity and broader economic and lifestyle migration trends.
+
+Overall, strong migration ties reflect not just movement volume, but ongoing interaction between metro areas, highlighting the key regions most closely linked to New York City’s population dynamics.
+
+## Population Projection Model
+
+### Task 7: Population Projections
+
+```{r}
+#| label: national-growth-parameters
+
+# keep only 50 states
+state_population_50 <- state_population_clean |>
+  filter(state_abbrev %in% state.abb)
+
+# national totals by year
+national_population_by_year <- state_population_50 |>
+  group_by(year) |>
+  summarise(total_population = sum(total_population), .groups = "drop")
+
+# ---------- External Migration (Abroad) ----------
+
+get_abroad_total_2024 <- function() {
+  file_2024 <- "data/mp03/State_to_State_Migration_Table_2024_T13.xlsx"
+
+  readxl::read_excel(
+    file_2024,
+    sheet = "Supplemental - Current Res",
+    skip = 10,
+    col_names = FALSE
+  ) |>
+    setNames(c(
+      "state_current",
+      "pop_total", "pop_total_moe",
+      "same_residence", "same_residence_moe",
+      "within_state_movers", "within_state_movers_moe",
+      "different_state_movers", "different_state_movers_moe",
+      "from_abroad", "from_abroad_moe"
+    )) |>
+    filter(state_current %in% state.name) |>
+    summarise(M_abroad = sum(as.numeric(from_abroad), na.rm = TRUE)) |>
+    pull(M_abroad)
+}
+
+get_abroad_total_2023 <- function() {
+  file_2023 <- "data/mp03/State_to_State_Migration_Table_2023_T13.xlsx"
+
+  table_2023_raw <- readxl::read_excel(
+    file_2023,
+    sheet = "Table",
+    skip = 11,
+    col_names = FALSE
+  )
+
+  names(table_2023_raw) <- paste0("col", seq_len(ncol(table_2023_raw)))
+
+  table_2023_raw |>
+    filter(col1 %in% state.name) |>
+    summarise(M_abroad = sum(as.numeric(col8), na.rm = TRUE)) |>
+    pull(M_abroad)
+}
+
+M_2023 <- get_abroad_total_2024()
+M_2022 <- get_abroad_total_2023()
+
+# ---------- Population Levels ----------
+
+P_2022 <- national_population_by_year |>
+  filter(year == 2022) |>
+  pull(total_population)
+
+P_2023 <- national_population_by_year |>
+  filter(year == 2023) |>
+  pull(total_population)
+
+P_2024 <- national_population_by_year |>
+  filter(year == 2024) |>
+  pull(total_population)
+
+# ---------- Natural Growth ----------
+
+gbar_2023 <- (P_2024 - M_2023) / P_2023 - 1
+gbar_2022 <- (P_2023 - M_2022) / P_2022 - 1
+gbar_avg  <- mean(c(gbar_2022, gbar_2023))
+
+# ---------- Migration Parameters ----------
+
+m_2023 <- state_migration_clean |>
+  filter(year_current == 2024, state_current != state_1y) |>
+  left_join(
+    state_population_50 |>
+      filter(year == 2023) |>
+      select(state_abbrev, pop_origin = total_population),
+    by = c("state_1y" = "state_abbrev")
+  ) |>
+  left_join(
+    state_population_50 |>
+      filter(year == 2023) |>
+      select(state_abbrev, pop_dest = total_population),
+    by = c("state_current" = "state_abbrev")
+  ) |>
+  transmute(
+    origin = state_1y,
+    destination = state_current,
+    m_2023 = population / sqrt(pop_origin * pop_dest)
+  )
+
+m_2022 <- state_migration_clean |>
+  filter(year_current == 2023, state_current != state_1y) |>
+  left_join(
+    state_population_50 |>
+      filter(year == 2022) |>
+      select(state_abbrev, pop_origin = total_population),
+    by = c("state_1y" = "state_abbrev")
+  ) |>
+  left_join(
+    state_population_50 |>
+      filter(year == 2022) |>
+      select(state_abbrev, pop_dest = total_population),
+    by = c("state_current" = "state_abbrev")
+  ) |>
+  transmute(
+    origin = state_1y,
+    destination = state_current,
+    m_2022 = population / sqrt(pop_origin * pop_dest)
+  )
+
+migration_parameters <- full_join(
+  m_2022,
+  m_2023,
+  by = c("origin", "destination")
+) |>
+  mutate(
+    m_2022 = replace_na(m_2022, 0),
+    m_2023 = replace_na(m_2023, 0),
+    m_avg = (m_2022 + m_2023) / 2
+  )
+
+# ---------- Display Tables ----------
+
+national_growth <- tibble(
+  year_base = c(2022L, 2023L),
+  M_abroad = c(M_2022, M_2023),
+  P_t = c(P_2022, P_2023),
+  P_t1 = c(P_2023, P_2024),
+  gbar = c(gbar_2022, gbar_2023)
+)
+
+national_growth_summary <- tibble(
+  parameter = c("gbar_2022", "gbar_2023", "gbar_avg"),
+  value = c(gbar_2022, gbar_2023, gbar_avg)
+)
+
+national_growth |>
+  gt() |>
+  fmt_integer(columns = c(M_abroad, P_t, P_t1)) |>
+  fmt_percent(columns = gbar, decimals = 2) |>
+  cols_label(
+    year_base = "Base Year",
+    M_abroad = "External Migration",
+    P_t = "Population (t)",
+    P_t1 = "Population (t+1)",
+    gbar = "Natural Growth Rate"
+  ) |>
+  tab_header(
+    title = "National Growth Inputs for the Projection Model"
+  )
+
+national_growth_summary |>
+  gt() |>
+  fmt_percent(columns = value, decimals = 2) |>
+  cols_label(
+    parameter = "Parameter",
+    value = "Estimated Rate"
+  ) |>
+  tab_header(
+    title = "Estimated Natural Growth Rates"
+  )
+```
+
+```{r}
+#| label: project-populations-forward
+
+project_one_year <- function(current_pop_df, migration_param_df, gbar_value, next_year) {
+
+  inflow_effect <- current_pop_df |>
+    select(state_abbrev, population) |>
+    rename(destination = state_abbrev, pop_dest = population) |>
+    tidyr::crossing(
+      current_pop_df |>
+        select(state_abbrev, population) |>
+        rename(origin = state_abbrev, pop_origin = population)
+    ) |>
+    filter(destination != origin) |>
+    left_join(
+      migration_param_df |>
+        select(origin, destination, m_avg),
+      by = c("origin", "destination")
+    ) |>
+    mutate(
+      m_avg = replace_na(m_avg, 0),
+      migration_component = m_avg * sqrt(pop_dest * pop_origin)
+    ) |>
+    group_by(destination, pop_dest) |>
+    summarise(
+      migration_inflow = sum(migration_component, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  current_pop_df |>
+    select(state_abbrev, population) |>
+    rename(destination = state_abbrev, pop_dest = population) |>
+    left_join(
+      inflow_effect,
+      by = c("destination", "pop_dest")
+    ) |>
+    mutate(
+      migration_inflow = replace_na(migration_inflow, 0),
+      population = pop_dest * (1 + gbar_value) + migration_inflow,
+      year = next_year
+    ) |>
+    transmute(
+      state_abbrev = destination,
+      year = year,
+      population = round(population)
+    )
+}
+
+population_2024 <- state_population_50 |>
+  filter(year == 2024) |>
+  transmute(
+    state_abbrev,
+    year,
+    population = total_population
+  )
+
+proj_2025 <- project_one_year(population_2024, migration_parameters, gbar_avg, 2025)
+proj_2026 <- project_one_year(proj_2025, migration_parameters, gbar_avg, 2026)
+proj_2027 <- project_one_year(proj_2026, migration_parameters, gbar_avg, 2027)
+proj_2028 <- project_one_year(proj_2027, migration_parameters, gbar_avg, 2028)
+proj_2029 <- project_one_year(proj_2028, migration_parameters, gbar_avg, 2029)
+proj_2030 <- project_one_year(proj_2029, migration_parameters, gbar_avg, 2030)
+
+population_projections <- bind_rows(
+  population_2024,
+  proj_2025,
+  proj_2026,
+  proj_2027,
+  proj_2028,
+  proj_2029,
+  proj_2030
+) |>
+  left_join(
+    state_population_50 |>
+      distinct(state_abbrev, state_name),
+    by = "state_abbrev"
+  ) |>
+  relocate(state_name, .after = state_abbrev)
+
+population_projections |>
+  filter(year == 2030) |>
+  arrange(desc(population)) |>
+  slice_head(n = 10) |>
+  gt() |>
+  fmt_integer(columns = population) |>
+  cols_label(
+    state_abbrev = "State",
+    state_name = "State Name",
+    year = "Year",
+    population = "Projected Population"
+  ) |>
+  tab_header(
+    title = "Top 10 Projected State Populations in 2030"
+  )
+```
+
+```{r}
+#| label: projected-population-plot
+
+population_projections |>
+  filter(state_abbrev %in% c("NY", "FL", "TX", "CA", "NC")) |>
+  ggplot(aes(x = year, y = population, color = state_abbrev)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = scales::comma_format()) +
+  scale_x_continuous(breaks = 2024:2030) +
+  labs(
+    title = "Projected Populations for Selected States Through 2030",
+    x = "Year",
+    y = "Population",
+    color = "State"
+  ) +
+  theme_minimal()
+```
+
+The projected population trends suggest continued growth in large and fast-growing states such as Texas and Florida, while more mature states like New York and California exhibit slower growth patterns. These projections reflect both natural population growth and migration dynamics captured in the model.
+
+States benefiting from strong inbound migration and positive growth trends are expected to continue gaining population share, while states with weaker migration inflows may experience slower relative growth through 2030.
+
+Because the model incorporates both natural growth and migration-adjusted flows, it captures the combined demographic forces driving long-term population change rather than relying on a single growth component.
+
+## Reapportionment
+
+### Task 8: Reapportionment
+
+```{r}
+#| label: reapportionment-huntington-hill
+
+# Use 2030 projected populations (50 states only)
+pop_2030 <- population_projections |>
+  filter(year == 2030, state_abbrev %in% state.abb) |>
+  select(state_abbrev, state_name, population)
+
+# Initialize: each state gets 1 seat
+seats <- pop_2030 |>
+  mutate(seats = 1L)
+
+# Function to compute next priority value for each state
+compute_priority <- function(df) {
+  df |>
+    mutate(priority = population / sqrt(seats * (seats + 1)))
+}
+
+# Total seats to allocate
+TOTAL_SEATS <- 435L
+allocated <- sum(seats$seats)  # should be 50
+
+# Iteratively assign remaining seats
+while (allocated < TOTAL_SEATS) {
+  seats <- compute_priority(seats)
+  
+  # pick state with max priority
+  idx <- which.max(seats$priority)
+  
+  # assign one more seat to that state
+  seats$seats[idx] <- seats$seats[idx] + 1L
+  
+  allocated <- allocated + 1L
+}
+
+# Final result
+reapportionment <- seats |>
+  select(state_abbrev, state_name, population, seats) |>
+  arrange(desc(seats))
+
+# Display top/bottom for sanity check
+reapportionment |>
+  slice_head(n = 10) |>
+  gt() |>
+  fmt_integer(columns = c(population, seats)) |>
+  cols_label(
+    state_abbrev = "State",
+    state_name = "State Name",
+    population = "Projected Population (2030)",
+    seats = "House Seats"
+  ) |>
+  tab_header(
+    title = "Top 10 States by Allocated House Seats (2030 Projection)"
+  )
+
+reapportionment |>
+  slice_tail(n = 10) |>
+  gt() |>
+  fmt_integer(columns = c(population, seats)) |>
+  cols_label(
+    state_abbrev = "State",
+    state_name = "State Name",
+    population = "Projected Population (2030)",
+    seats = "House Seats"
+  ) |>
+  tab_header(
+    title = "Bottom 10 States by Allocated House Seats (2030 Projection)"
+  )
+```
+
+```{r}
+#| label: reapportionment-plot
+
+reapportionment |>
+  arrange(desc(seats)) |>
+  slice_head(n = 15) |>
+  mutate(state_abbrev = forcats::fct_reorder(state_abbrev, seats)) |>
+  ggplot(aes(x = seats, y = state_abbrev)) +
+  geom_col() +
+  labs(
+    title = "Top States by House Seats (2030 Projection)",
+    x = "Number of Seats",
+    y = NULL
+  ) +
+  theme_minimal()
+```
+
+The Huntington–Hill reapportionment results translate projected population changes into political representation. States with higher projected populations receive more House seats, reflecting their relative share of the national population. Notably, many of the states gaining representation—such as Texas and Florida—are the same states experiencing strong net migration and population growth, reinforcing the connection between demographic change and political influence.
+
+Comparing these results with migration and population growth patterns highlights how demographic shifts influence political power. Fast-growing states, particularly in the South and Sun Belt, tend to gain representation, while slower-growing states may lose relative influence. This reinforces the broader trend of population redistribution shaping both economic and political landscapes.
+
+## Final Deliverable: Ensuring State Political Power in 2032
+
+## Executive Summary
+
+This analysis examines recent population dynamics across the United States using migration data, population trends, and forward projections through 2030. The results show a clear pattern of population redistribution, with strong growth concentrated in the South and Mountain West regions. States such as Florida, Texas, and North Carolina continue to attract large inflows of residents, while several Northeastern and West Coast states experience slower growth or net out-migration.
+
+At the state level, migration patterns reveal that high-cost, densely populated states tend to lose residents to lower-cost, high-growth regions. At the metro level, New York City demonstrates strong connections both regionally and nationally, with significant two-way migration flows to nearby Northeastern metros and major Sun Belt destinations.
+
+Using a projection model that incorporates both natural population growth and interstate migration, population trends through 2030 suggest continued expansion in fast-growing states, reinforcing existing demographic shifts. The Huntington–Hill reapportionment results further indicate that these population changes translate directly into political representation, with growing states gaining influence in the House of Representatives.
+
+States such as Florida, Texas, and North Carolina consistently appear among the top destinations for inbound migration and population growth, while states like New York and California show stronger outbound migration patterns.
+
+Overall, the findings highlight a sustained geographic shift in population, economic activity, and political power toward high-growth regions of the country.
+
+## Recommended Advertising Strategy
+
+The population and migration trends identified in this analysis suggest a strategic shift in advertising investment toward high-growth states and metropolitan areas. States such as Florida and Texas, which rank among the highest in both net migration and projected population growth, should be prioritized for expanded advertising investment. These states not only attract large inflows of residents but also show sustained growth through 2030, making them high-value long-term markets. Additionally, metro-level results indicate that many outbound movers from New York City are relocating to Sun Belt metros, suggesting an opportunity to follow migrating consumers and reallocate advertising spend accordingly.
+
+Advertising efforts should prioritize states such as Florida, Texas, and North Carolina, which consistently rank among the top destinations for inbound migration and projected population growth. These areas offer opportunities to capture new residents who are actively establishing consumption patterns, housing arrangements, and long-term brand preferences.
+
+At the metropolitan level, the New York City metro remains a critical hub due to its large population and strong national connections. However, outbound migration patterns indicate that many former residents are relocating to fast-growing metros in Florida, Texas, and other Sun Belt regions. As a result, advertising strategies should extend beyond traditional core markets to include these emerging destination metros.
+
+A dual-market strategy is recommended:
+- Maintain a strong presence in major legacy markets such as New York City to retain brand visibility.
+- Expand targeted campaigns in high-growth destination markets to capture migrating populations and new demand.
+
+By aligning advertising investment with migration-driven population growth, organizations can position themselves to capitalize on shifting demographics and maximize long-term market reach.
+
+## Supporting Evidence
+
+- States such as Florida and Texas rank among the highest in net migration and projected population growth.
+- New York shows significant outbound migration, particularly to Florida, New Jersey, and Pennsylvania.
+- Metro-level data indicates strong migration connections between New York City and both nearby Northeastern metros and major Sun Belt metros.
+- Interstate migration corridors are concentrated among a small number of high-volume flows, including New York to Florida and California to Texas.
+- Population projections suggest continued growth in high-migration states, which is reflected in increased representation under the reapportionment model.
+
+## Conclusion
+
+This analysis demonstrates that population change in the United States is being driven by a combination of natural growth and significant migration flows between states and metropolitan areas. The data reveals a consistent pattern of movement away from higher-cost, densely populated regions toward lower-cost, high-growth states, particularly in the South and Sun Belt.
+
+These migration trends not only reshape local economies and housing markets but also influence long-term population projections and political representation. The projection model indicates that current growth patterns are likely to persist through 2030, reinforcing the increasing importance of fast-growing states. The reapportionment results further confirm that these demographic shifts translate into changes in political influence at the national level.
+
+At both the state and metro levels, strong migration corridors and connections highlight the geographic relationships that drive population redistribution. Understanding these patterns is critical for strategic decision-making across industries.
+
+Notably, the states projected to experience the strongest population growth—such as Texas and Florida—also gain representation under the reapportionment model, reinforcing the direct link between migration-driven population change and political power.
+
+In summary, population and migration trends point toward a continued realignment of economic activity, consumer demand, and political power. Organizations that recognize and adapt to these shifts will be better positioned to succeed in an evolving national landscape.
+
+## Extra Credit: Migration vs Population Growth
+
+To further explore the relationship between migration and population change, I compare net migration with projected population growth.
+
+States with strong positive net migration, such as Texas and Florida, also show the largest projected population increases through 2030. This reinforces the idea that migration is a primary driver of population growth and future political influence.
+
+The positive relationship between net migration and projected growth suggests that migration is not only correlated with growth but is a primary driver of future population expansion.
+
+::: {.callout-note title="AI Usage Statement" collapse="true"}
+ChatGPT was used to help write code for this project, assist with debugging, and provide guidance on data wrangling and analytical structure. All non-code text in this report was written without the use of generative AI tools.
+:::
