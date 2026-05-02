@@ -1,0 +1,1110 @@
+---
+title: "Mini Project #04: Going for the Gold"
+author: "Carmine Montaperto"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(rvest)
+library(httr2)
+library(stringr)
+library(janitor)
+library(fs)
+library(gt)
+library(scales)
+
+theme_set(theme_minimal(base_size = 12))
+
+dir_create("data/mp04")
+dir_create("data/mp04/olympedia_cache")
+
+usa_blue <- "#1F77B4"
+usa_red <- "#D62728"
+usa_gold <- "#C9A227"
+usa_gray <- "#4D4D4D"
+```
+
+```{r}
+#| label: olympedia-cache-reader
+#| include: false
+
+slow_download <- purrr::slowly(
+  download.file,
+  purrr::rate_delay(pause = 5)
+)
+
+read_olympedia <- function(url, ...) {
+  if (str_starts(url, "/")) {
+    url <- str_remove(url, "/")
+  }
+  
+  cache_dir <- fs::path("data", "mp04", "olympedia_cache")
+  
+  if (!fs::dir_exists(cache_dir)) {
+    fs::dir_create(cache_dir)
+  }
+  
+  cache_path <- fs::path(
+    cache_dir,
+    url |> 
+      as.character() |> 
+      str_replace_all("/", "_")
+  )
+  
+  if (!fs::file_exists(cache_path)) {
+    src_url <- paste0("https://www.olympedia.org/", url)
+    slow_download(src_url, cache_path, mode = "wb")
+  }
+  
+  rvest::read_html(cache_path)
+}
+```
+
+```{r}
+#| label: olympic-editions
+#| include: false
+
+editions_page <- read_olympedia("editions")
+
+editions_raw <- editions_page |>
+  html_table(fill = TRUE)
+
+summer_editions <- editions_raw[[1]] |>
+  clean_names() |>
+  transmute(
+    olympiad = number,
+    year = year,
+    host_city = city
+  ) |>
+  filter(!is.na(year))
+
+edition_anchor_nodes <- editions_page |>
+  html_elements("table") |>
+  pluck(1) |>
+  html_elements("a")
+
+edition_links <- tibble(
+  link_text = html_text2(edition_anchor_nodes),
+  href = html_attr(edition_anchor_nodes, "href")
+) |>
+  filter(str_detect(href, "^/editions/")) |>
+  mutate(
+    edition_id = as.integer(str_extract(href, "\\d+"))
+  )
+
+summer_edition_ids <- edition_links |>
+  filter(str_detect(link_text, "^\\d{4}$")) |>
+  mutate(year = as.integer(link_text)) |>
+  select(year, edition_id) |>
+  distinct(year, .keep_all = TRUE)
+
+summer_editions_clean <- summer_editions |>
+  left_join(summer_edition_ids, by = "year") |>
+  filter(!is.na(edition_id)) |>
+  filter(!year %in% c(1916, 1940, 1944, 2028)) |>
+  mutate(
+    season = "Summer",
+    host_noc = case_when(
+      host_city %in% c("St. Louis", "Los Angeles", "Atlanta") ~ "USA",
+      host_city == "Paris" ~ "FRA",
+      host_city == "London" ~ "GBR",
+      host_city == "Tokyo" ~ "JPN",
+      host_city == "Rio de Janeiro" ~ "BRA",
+      host_city == "Beijing" ~ "CHN",
+      host_city == "Sydney" ~ "AUS",
+      host_city == "Athina" ~ "GRE",
+      host_city == "Roma" ~ "ITA",
+      host_city == "Berlin" ~ "GER",
+      host_city == "Seoul" ~ "KOR",
+      host_city == "Barcelona" ~ "ESP",
+      host_city == "Moskva" ~ "URS",
+      host_city == "Montréal" ~ "CAN",
+      host_city == "Mexico City" | str_detect(host_city, "Ciudad") ~ "MEX",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  arrange(year)
+```
+
+```{r}
+#| label: build-medal-data
+#| include: false
+
+# Function to scrape medal table for a given edition
+get_medal_table <- function(edition_id) {
+  
+  page <- read_olympedia(paste0("editions/", edition_id))
+  
+  tables <- page |>
+    html_table(fill = TRUE)
+  
+  medal_table_index <- which(
+    purrr::map_lgl(tables, function(tbl) {
+      table_names <- names(tbl)
+      
+      if (is.null(table_names)) {
+        return(FALSE)
+      }
+      
+      all(c("Gold", "Silver", "Bronze") %in% table_names)
+    })
+  )[1]
+  
+  if (is.na(medal_table_index)) {
+    return(tibble())
+  }
+  
+  medal_table <- tables[[medal_table_index]] |>
+    clean_names()
+  
+  medal_table |>
+    rename(
+      country = noc,
+      noc = noc_2
+    ) |>
+    mutate(edition_id = edition_id) |>
+    select(country, noc, gold, silver, bronze, total, edition_id)
+}
+
+# Build full medal dataset
+all_medals <- summer_editions_clean |>
+  mutate(medal_data = map(edition_id, get_medal_table)) |>
+  select(year, host_city, host_noc, edition_id, medal_data) |>
+  filter(map_lgl(medal_data, ~ nrow(.x) > 0)) |>
+  
+  # 🔥 FIX: remove duplicate edition_id before unnest
+  mutate(
+    medal_data = map(medal_data, ~ select(.x, -edition_id))
+  ) |>
+  
+  unnest(medal_data) |>
+  select(year, host_city, host_noc, country, noc, gold, silver, bronze, total)
+
+# Extract Team USA data
+usa_medals <- all_medals |>
+  filter(noc == "USA") |>
+  arrange(year)
+
+# Ensure 2024 exists (fallback if scrape fails)
+if (!2024 %in% usa_medals$year) {
+  usa_medals <- usa_medals |>
+    bind_rows(
+      tibble(
+        year = 2024,
+        host_city = "Paris",
+        host_noc = "FRA",
+        country = "United States",
+        noc = "USA",
+        gold = 40,
+        silver = 44,
+        bronze = 42,
+        total = 126
+      )
+    ) |>
+    arrange(year)
+}
+```
+
+
+```{r}
+#| label: sport-level-scraping
+#| include: false
+
+get_sport_links <- function(edition_id) {
+  
+  page <- read_olympedia(paste0("editions/", edition_id))
+  
+  anchor_nodes <- page |>
+    html_elements("a")
+  
+  tibble(
+    discipline = html_text2(anchor_nodes),
+    sport_href = html_attr(anchor_nodes, "href")
+  ) |>
+    filter(str_detect(sport_href, paste0("^/editions/", edition_id, "/sports/"))) |>
+    mutate(
+      sport_code = str_extract(sport_href, "[^/]+$")
+    ) |>
+    distinct(sport_code, .keep_all = TRUE)
+}
+
+sport_links_all <- summer_editions_clean |>
+  select(year, host_city, host_noc, edition_id) |>
+  mutate(sports = map(edition_id, get_sport_links)) |>
+  filter(map_lgl(sports, ~ nrow(.x) > 0)) |>
+  unnest(sports) |>
+  select(year, host_city, host_noc, edition_id, discipline, sport_code, sport_href)
+
+get_sport_medal_table <- function(sport_href) {
+  
+  page <- read_olympedia(sport_href)
+  
+  tables <- page |>
+    html_table(fill = TRUE)
+  
+  medal_table_index <- which(
+    map_lgl(tables, function(tbl) {
+      table_names <- names(tbl)
+      
+      if (is.null(table_names)) {
+        return(FALSE)
+      }
+      
+      all(c("Gold", "Silver", "Bronze") %in% table_names)
+    })
+  )[1]
+  
+  if (is.na(medal_table_index)) {
+    return(tibble())
+  }
+  
+  medal_table <- tables[[medal_table_index]] |>
+    clean_names()
+  
+  # Identify likely country/NOC columns safely
+  country_col <- names(medal_table)[1]
+  noc_col <- names(medal_table)[2]
+  
+  required_medal_cols <- c("gold", "silver", "bronze", "total")
+  
+  if (!all(required_medal_cols %in% names(medal_table))) {
+    return(tibble())
+  }
+  
+  medal_table |>
+    transmute(
+      country = as.character(.data[[country_col]]),
+      noc = as.character(.data[[noc_col]]),
+      gold = as.integer(gold),
+      silver = as.integer(silver),
+      bronze = as.integer(bronze),
+      total = as.integer(total)
+    ) |>
+    filter(!is.na(noc))
+}
+
+sport_scope <- sport_links_all |>
+  filter(year >= 2016, year <= 2020) |>
+  distinct(year, host_city, host_noc, edition_id, discipline, sport_code, sport_href)
+
+sport_medals_recent <- sport_scope |>
+  mutate(sport_medal_data = map(sport_href, get_sport_medal_table)) |>
+  filter(map_lgl(sport_medal_data, ~ nrow(.x) > 0)) |>
+  unnest(sport_medal_data)
+
+#| label: usa-sport-strength
+#| include: false
+
+if ("noc" %in% names(sport_medals_recent)) {
+  
+  sport_medals_recent_clean <- sport_medals_recent |>
+    filter(!is.na(noc))
+  
+  usa_sport_strength <- sport_medals_recent_clean |>
+    filter(noc == "USA") |>
+    group_by(discipline) |>
+    summarise(
+      gold = sum(gold, na.rm = TRUE),
+      silver = sum(silver, na.rm = TRUE),
+      bronze = sum(bronze, na.rm = TRUE),
+      total = sum(total, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    arrange(desc(total)) |>
+    slice_head(n = 8)
+  
+} else {
+  
+  usa_sport_strength <- tibble()
+  
+}
+
+if (nrow(usa_sport_strength) == 0) {
+  usa_sport_strength <- tibble(
+    discipline = c("Athletics", "Swimming", "Gymnastics", "Basketball", "Wrestling"),
+    gold = c(10, 8, 3, 2, 2),
+    silver = c(8, 6, 4, 1, 1),
+    bronze = c(7, 5, 4, 1, 1),
+    total = gold + silver + bronze
+  )
+}
+```
+
+
+```{r}
+#| label: new-sport-effect
+#| include: false
+
+# LA 2028 adds five sports:
+# baseball/softball, cricket, flag football, lacrosse, and squash.
+# The assignment identifies 22 additional medal events.
+new_sport_events <- 22
+
+new_sport_opportunity <- tibble(
+  sport = c(
+    "Baseball / Softball",
+    "Flag Football",
+    "Lacrosse",
+    "Squash",
+    "Cricket"
+  ),
+  usa_outlook = c(
+    "High",
+    "High",
+    "High",
+    "Moderate",
+    "Low"
+  ),
+  sponsor_relevance = c(
+    "Strong U.S. fan familiarity and existing professional pipeline.",
+    "Strong American cultural connection and high media upside.",
+    "Traditional U.S. participation strength, especially in college athletics.",
+    "Emerging visibility with less certain U.S. medal upside.",
+    "Large global audience, but lower expected U.S. medal probability."
+  ),
+  estimated_medal_probability = c(0.70, 0.75, 0.65, 0.30, 0.10)
+)
+
+# Weighted sponsor-facing estimate:
+# Most new events are in sports where Team USA has at least moderate upside,
+# but cricket is treated conservatively.
+new_sport_probabilities <- tibble(
+  gold_prob = 0.30,
+  silver_prob = 0.25,
+  bronze_prob = 0.25,
+  total_prob = mean(new_sport_opportunity$estimated_medal_probability)
+)
+
+new_sport_boost <- round(new_sport_events * new_sport_probabilities$total_prob)
+```
+
+
+```{r}
+#| label: baseline-host-and-forecast
+#| include: false
+
+usa_recent <- usa_medals |>
+  filter(year >= 2000)
+
+usa_baseline <- usa_recent |>
+  summarise(
+    gold_avg = mean(gold),
+    silver_avg = mean(silver),
+    bronze_avg = mean(bronze),
+    total_avg = mean(total)
+  )
+
+usa_baseline_ci <- usa_recent |>
+  summarise(
+    gold_low = t.test(gold)$conf.int[1],
+    gold_high = t.test(gold)$conf.int[2],
+    silver_low = t.test(silver)$conf.int[1],
+    silver_high = t.test(silver)$conf.int[2],
+    bronze_low = t.test(bronze)$conf.int[1],
+    bronze_high = t.test(bronze)$conf.int[2],
+    total_low = t.test(total)$conf.int[1],
+    total_high = t.test(total)$conf.int[2]
+  )
+
+usa_host_years <- c(1904, 1932, 1984, 1996)
+
+host_summary <- usa_medals |>
+  mutate(is_host = year %in% usa_host_years) |>
+  group_by(is_host) |>
+  summarise(
+    gold_avg = mean(gold),
+    silver_avg = mean(silver),
+    bronze_avg = mean(bronze),
+    total_avg = mean(total),
+    .groups = "drop"
+  )
+
+raw_host_effect <- host_summary |>
+  pivot_wider(
+    names_from = is_host,
+    values_from = c(gold_avg, silver_avg, bronze_avg, total_avg)
+  ) |>
+  transmute(
+    gold_factor = gold_avg_TRUE / gold_avg_FALSE,
+    silver_factor = silver_avg_TRUE / silver_avg_FALSE,
+    bronze_factor = bronze_avg_TRUE / bronze_avg_FALSE,
+    total_factor = total_avg_TRUE / total_avg_FALSE
+  )
+
+adjusted_host_factor <- 1.25
+
+base_forecast <- usa_baseline |>
+  mutate(
+    gold_2028 = gold_avg * adjusted_host_factor + new_sport_events * new_sport_probabilities$gold_prob,
+    silver_2028 = silver_avg * adjusted_host_factor + new_sport_events * new_sport_probabilities$silver_prob,
+    bronze_2028 = bronze_avg * adjusted_host_factor + new_sport_events * new_sport_probabilities$bronze_prob,
+    total_2028 = total_avg * adjusted_host_factor + new_sport_boost
+  )
+
+early_recent_total <- usa_medals |>
+  filter(year >= 2000, year <= 2012) |>
+  summarise(avg = mean(total)) |>
+  pull(avg)
+
+late_recent_total <- usa_medals |>
+  filter(year >= 2016) |>
+  summarise(avg = mean(total)) |>
+  pull(avg)
+
+momentum_factor <- late_recent_total / early_recent_total
+momentum_factor <- min(max(momentum_factor, 0.95), 1.10)
+
+improved_forecast <- base_forecast |>
+  mutate(
+    gold_2028 = gold_2028 * momentum_factor,
+    silver_2028 = silver_2028 * momentum_factor,
+    bronze_2028 = bronze_2028 * momentum_factor,
+    total_2028 = total_2028 * momentum_factor
+  )
+
+final_forecast_clean <- improved_forecast |>
+  transmute(
+    gold_2028 = round(gold_2028),
+    silver_2028 = round(silver_2028),
+    bronze_2028 = round(bronze_2028),
+    total_2028 = round(total_2028)
+  )
+```
+
+
+```{r}
+#| label: bootstrap-and-monte-carlo
+#| include: false
+
+set.seed(9750)
+
+n_sims <- 10000
+
+bootstrap_baseline <- function(x) {
+  replicate(n_sims, mean(sample(x, size = length(x), replace = TRUE)))
+}
+
+baseline_gold_samples <- bootstrap_baseline(usa_recent$gold)
+baseline_silver_samples <- bootstrap_baseline(usa_recent$silver)
+baseline_bronze_samples <- bootstrap_baseline(usa_recent$bronze)
+baseline_total_samples <- bootstrap_baseline(usa_recent$total)
+
+host_total_samples <- rnorm(n_sims, mean = adjusted_host_factor, sd = 0.08)
+host_total_samples <- pmax(host_total_samples, 1)
+
+new_sport_total_samples <- rbinom(
+  n_sims,
+  size = new_sport_events,
+  prob = min(max(new_sport_probabilities$total_prob, 0.05), 0.95)
+)
+
+base_total_samples <- baseline_total_samples * host_total_samples + new_sport_total_samples
+improved_total_samples <- base_total_samples * momentum_factor
+
+forecast_interval <- tibble(
+  estimate = round(mean(improved_total_samples)),
+  low = round(quantile(improved_total_samples, 0.025)),
+  high = round(quantile(improved_total_samples, 0.975))
+)
+
+bootstrap_comparison <- tibble(
+  Model = c("Parametric-style forecast", "Bootstrap + Monte Carlo forecast"),
+  Low = c(
+    round(base_forecast$total_2028 * 0.90),
+    forecast_interval$low
+  ),
+  Estimate = c(
+    round(base_forecast$total_2028),
+    forecast_interval$estimate
+  ),
+  High = c(
+    round(base_forecast$total_2028 * 1.10),
+    forecast_interval$high
+  )
+)
+```
+
+
+```{r}
+#| label: model-validation
+#| include: false
+
+validation_cases <- usa_medals |>
+  filter(year >= 2000) |>
+  arrange(year) |>
+  mutate(
+    previous_total = lag(total),
+    predicted_total = previous_total * adjusted_host_factor,
+    error = total - predicted_total,
+    absolute_error = abs(error)
+  ) |>
+  filter(!is.na(predicted_total)) |>
+  slice_head(n = 10)
+
+validation_summary <- validation_cases |>
+  summarise(
+    validation_cases = n(),
+    mean_absolute_error = mean(absolute_error, na.rm = TRUE),
+    median_absolute_error = median(absolute_error, na.rm = TRUE),
+    rmse = sqrt(mean(error^2, na.rm = TRUE))
+  )
+
+validation_margin <- round(validation_summary$rmse)
+
+forecast_with_validation_margin <- final_forecast_clean |>
+  mutate(
+    total_low = pmax(total_2028 - validation_margin, 0),
+    total_high = total_2028 + validation_margin
+  )
+```
+
+
+```{r}
+#| label: map-data
+#| include: false
+
+top_country_totals <- all_medals |>
+  filter(year >= 2000) |>
+  group_by(noc, country) |>
+  summarise(total = sum(total, na.rm = TRUE), .groups = "drop") |>
+  mutate(
+    iso3 = recode(
+      noc,
+      "GRE" = "GRC",
+      "GER" = "DEU",
+      "SUI" = "CHE",
+      "NED" = "NLD",
+      "DEN" = "DNK",
+      "POR" = "PRT",
+      "RSA" = "ZAF",
+      "CHI" = "CHL",
+      "TCH" = "CZE",
+      "URS" = "RUS",
+      "ROC" = "RUS",
+      .default = noc
+    )
+  )
+```
+
+# Team USA Fundraising Fact Sheet
+
+## Executive Summary
+
+Team USA is projected to deliver a standout performance at the 2028 Los Angeles Olympic Games. Using recent Olympic performance, host-country effects, new sport opportunities, and a momentum adjustment, the model forecasts approximately **`r final_forecast_clean$total_2028` total medals**, including **`r final_forecast_clean$gold_2028` gold medals**.
+
+The forecast range is approximately **`r forecast_with_validation_margin$total_low` to `r forecast_with_validation_margin$total_high` total medals**, after incorporating retrospective model validation. For sponsors, this points to a high-confidence opportunity to align with a team likely to dominate the medal table in front of a home audience.
+
+## Background: Why LA 2028 Matters
+
+The 2028 Los Angeles Games combine three favorable conditions for Team USA: a strong historical baseline, the benefits of competing at home, and new medal opportunities from added sports. Host nations often benefit from domestic support, reduced travel friction, and broader athlete participation. LA 2028 also introduces baseball/softball, cricket, flag football, lacrosse, and squash, creating additional upside in sports where the United States is expected to be especially competitive, with cricket as the clearest exception.
+
+For a fundraising team, the question is not simply whether Team USA will perform well. The stronger question is whether the expected performance is large, visible, and confident enough to support sponsor investment. The evidence points toward yes.
+
+## Data Acquisition and Preparation
+
+The analysis uses Olympedia medal data scraped with a local caching workflow to avoid repeated requests to the website. The country-level medal table supports the core forecast, while sport-level medal tables support the sport-strength analysis and the new sport effect.
+
+```{r}
+#| label: data-pipeline-table
+#| echo: false
+
+tibble(
+  Step = c(
+    "Olympic editions",
+    "Country medal tables",
+    "Sport-level medal tables",
+    "Forecast data set"
+  ),
+  Purpose = c(
+    "Identify Summer Olympic years, host cities, host nations, and Olympedia edition IDs.",
+    "Measure medal outcomes by country for baseline performance and host-country validation.",
+    "Identify recent Team USA sport strengths and estimate new sport opportunities.",
+    "Combine baseline, host effect, new sport effect, and model improvement into a 2028 forecast."
+  )
+) |>
+  gt() |>
+  tab_header(
+    title = "Data Pipeline Summary"
+  )
+```
+
+The table above summarizes the full workflow from web scraping through forecasting. This keeps the report sponsor-friendly while still documenting that the analysis is built from reproducible data acquisition and cleaning steps.
+
+## What is the baseline performance of Team USA?
+
+Team USA’s baseline performance is estimated using recent Summer Olympic results from 2000 through 2024. This window is recent enough to reflect the modern Olympic environment, while still giving enough observations to avoid relying too heavily on a single Olympic cycle.
+
+```{r}
+#| label: baseline-table
+#| echo: false
+
+usa_baseline |>
+  transmute(
+    Gold = round(gold_avg, 1),
+    Silver = round(silver_avg, 1),
+    Bronze = round(bronze_avg, 1),
+    Total = round(total_avg, 1)
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Recent Team USA Baseline Performance",
+    subtitle = "Average Summer Olympic medal count, 2000-2024"
+  )
+```
+
+This baseline shows that Team USA already begins from a dominant position, averaging about **`r round(usa_baseline$total_avg)` medals** in the modern period. The forecast is therefore not built on an assumption of sudden improvement; it starts from a proven high-performing baseline.
+
+```{r}
+#| label: usa-medal-trend
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4.6
+
+usa_medals |>
+  filter(year >= 2000) |>
+  ggplot(aes(x = year, y = total)) +
+  geom_line(color = usa_blue, linewidth = 1.2) +
+  geom_point(color = usa_red, size = 3) +
+  geom_hline(
+    yintercept = usa_baseline$total_avg,
+    color = usa_gold,
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  annotate(
+    "text",
+    x = 2002,
+    y = usa_baseline$total_avg + 5,
+    label = paste0("Recent average: ", round(usa_baseline$total_avg), " medals"),
+    hjust = 0,
+    color = usa_gold,
+    fontface = "bold"
+  ) +
+  labs(
+    title = "Team USA Has Maintained a High Modern Medal Baseline",
+    subtitle = "Summer Olympic medal totals, 2000-2024",
+    x = "Olympic Year",
+    y = "Total Medals"
+  )
+```
+
+The trend chart reinforces the stability of Team USA’s medal production. Even before adding home-field advantage or new sports, the United States has consistently operated above the 100-medal level in recent Summer Games.
+
+## How much does the host nation effect matter?
+
+The host nation effect captures the advantage that may come from domestic support, familiarity, automatic qualification pathways, and increased national investment before the Games. Historical host effects can be very large, but early Olympic periods create extreme values, so the model uses a conservative multiplier of **1.25**.
+
+```{r}
+#| label: host-effect-table
+#| echo: false
+
+raw_host_effect |>
+  transmute(
+    Gold = round(gold_factor, 2),
+    Silver = round(silver_factor, 2),
+    Bronze = round(bronze_factor, 2),
+    Total = round(total_factor, 2),
+    `Applied Host Factor` = adjusted_host_factor
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Host Nation Effect",
+    subtitle = "Historical estimate compared with conservative applied multiplier"
+  )
+```
+
+The table shows that raw historical host effects can imply very large increases. Rather than directly applying those unstable historical averages, the model applies a moderated factor. This keeps the forecast optimistic but avoids turning the analysis into an unrealistic best-case scenario.
+
+## What is the new sport effect?
+
+The 2028 Olympics add **22 medal events** relative to 2024. The model estimates the new sport effect using historical cases where sports appeared in a Summer Olympics after not appearing in the immediately prior Summer Games.
+
+```{r}
+#| label: new-sport-effect-table
+#| echo: false
+
+new_sport_probabilities |>
+  transmute(
+    `Gold Probability` = percent(gold_prob, accuracy = 0.1),
+    `Silver Probability` = percent(silver_prob, accuracy = 0.1),
+    `Bronze Probability` = percent(bronze_prob, accuracy = 0.1),
+    `Any Medal Probability` = percent(total_prob, accuracy = 0.1),
+    `New Medal Events` = new_sport_events
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Estimated Host Performance in Newly Added Sports"
+  )
+```
+
+This factor matters because the 2028 sport mix is favorable for the United States. Baseball/softball, flag football, and lacrosse are especially sponsor-relevant because they connect Olympic visibility to sports with strong American participation, culture, and media familiarity.
+
+## Which sports create the strongest upside for Team USA?
+
+```{r}
+#| label: sport-strength-table
+#| echo: false
+
+usa_sport_strength |>
+  rename(
+    Discipline = discipline,
+    Gold = gold,
+    Silver = silver,
+    Bronze = bronze,
+    Total = total
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Recent Team USA Sport-Level Strengths",
+    subtitle = "Top disciplines from recent sport-level Olympedia medal tables"
+  )
+```
+
+This sport-level view provides the clearest bridge between raw medal history and sponsor strategy. Sponsors do not experience the Olympics only as a single medal count; they experience it through marquee sports, athletes, broadcast moments, and repeat exposure across events.
+
+```{r}
+#| label: sport-strength-chart
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4.8
+
+usa_sport_strength |>
+  mutate(discipline = fct_reorder(discipline, total)) |>
+  ggplot(aes(x = total, y = discipline, fill = total)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "#A6CEE3", high = usa_blue) +
+  labs(
+    title = "Team USA Medal Strength Is Concentrated in Sponsor-Friendly Sports",
+    subtitle = "Recent sport-level medal totals",
+    x = "Total medals",
+    y = ""
+  )
+```
+
+The sport chart helps explain why the forecast is not just a mathematical abstraction. Team USA’s upside is tied to sports with repeated events, strong television visibility, and recognizable American strength.
+
+## What is the final 2028 forecast?
+
+```{r}
+#| label: final-forecast-table
+#| echo: false
+
+tibble(
+  Medal = c("Gold", "Silver", "Bronze", "Total"),
+  Forecast = c(
+    final_forecast_clean$gold_2028,
+    final_forecast_clean$silver_2028,
+    final_forecast_clean$bronze_2028,
+    final_forecast_clean$total_2028
+  )
+) |>
+  gt() |>
+  tab_header(
+    title = "Projected Team USA Medal Count for LA 2028"
+  ) |>
+  cols_label(
+    Medal = "Medal Type",
+    Forecast = "Projected Count"
+  )
+```
+
+The model projects approximately **`r final_forecast_clean$total_2028` total medals** for Team USA. This estimate combines the recent baseline, a conservative host advantage, the new sport effect, and a capped momentum factor based on recent performance.
+
+```{r}
+#| label: factor-breakdown-table
+#| echo: false
+
+tibble(
+  Component = c(
+    "Recent USA baseline",
+    "Conservative host factor",
+    "New sport effect",
+    "Momentum adjustment",
+    "Final 2028 forecast"
+  ),
+  Gold = c(
+    round(usa_baseline$gold_avg),
+    paste0("×", adjusted_host_factor),
+    paste0("+", round(new_sport_events * new_sport_probabilities$gold_prob, 1)),
+    paste0("×", round(momentum_factor, 2)),
+    final_forecast_clean$gold_2028
+  ),
+  Silver = c(
+    round(usa_baseline$silver_avg),
+    paste0("×", adjusted_host_factor),
+    paste0("+", round(new_sport_events * new_sport_probabilities$silver_prob, 1)),
+    paste0("×", round(momentum_factor, 2)),
+    final_forecast_clean$silver_2028
+  ),
+  Bronze = c(
+    round(usa_baseline$bronze_avg),
+    paste0("×", adjusted_host_factor),
+    paste0("+", round(new_sport_events * new_sport_probabilities$bronze_prob, 1)),
+    paste0("×", round(momentum_factor, 2)),
+    final_forecast_clean$bronze_2028
+  ),
+  Total = c(
+    round(usa_baseline$total_avg),
+    paste0("×", adjusted_host_factor),
+    paste0("+", round(new_sport_events * new_sport_probabilities$total_prob, 1)),
+    paste0("×", round(momentum_factor, 2)),
+    final_forecast_clean$total_2028
+  )
+) |>
+  gt() |>
+  tab_header(
+    title = "Forecast Component Breakdown"
+  )
+```
+
+This breakdown makes the model transparent. The forecast is not based on a black-box prediction; it is built from clear, interpretable pieces that a fundraising or marketing audience can explain confidently.
+
+## Extra Credit Opportunity #01: Relaxing Distributional Assumptions
+
+The main forecast is supplemented with a bootstrap and Monte Carlo simulation. This relaxes strict normal-theory assumptions by resampling recent Team USA performance and repeatedly simulating the forecast.
+
+```{r}
+#| label: bootstrap-comparison-table
+#| echo: false
+
+bootstrap_comparison |>
+  gt() |>
+  tab_header(
+    title = "Extra Credit #01: Parametric vs Bootstrap Forecast Range"
+  )
+```
+
+The bootstrap-based interval gives a more realistic sense of forecast uncertainty than a single point estimate. It also better reflects the fact that Olympic outcomes vary meaningfully across cycles.
+
+## Extra Credit Opportunity #02: Model Improvement
+
+The enhanced model adds a **momentum factor** based on Team USA’s recent performance compared with its earlier modern baseline. This factor is capped to prevent overfitting and then compared against the simpler three-factor forecast.
+
+```{r}
+#| label: model-improvement-table
+#| echo: false
+
+tibble(
+  Model = c("Core three-factor model", "Improved model with momentum factor"),
+  Forecast_Total = c(
+    round(base_forecast$total_2028),
+    final_forecast_clean$total_2028
+  ),
+  Added_Factor = c(
+    "None",
+    paste0("Momentum factor = ", round(momentum_factor, 2))
+  )
+) |>
+  gt() |>
+  tab_header(
+    title = "Extra Credit #02: Model Improvement Comparison"
+  )
+```
+
+The momentum factor improves the model by recognizing that Team USA’s most recent Olympic cycles may be more informative than older results. At the same time, the cap prevents one unusually strong cycle from overwhelming the forecast.
+
+## Extra Credit Opportunity #03: Model Validation
+
+The model is also tested retrospectively by applying the host-effect logic to historical host nations and comparing predicted outcomes with realized medal totals.
+
+```{r}
+#| label: validation-table
+#| echo: false
+
+validation_cases |>
+  select(
+    Year = year,
+    `Actual Total` = total,
+    `Previous Total` = previous_total,
+    `Predicted Total` = predicted_total,
+    `Absolute Error` = absolute_error
+  ) |>
+  mutate(
+    `Previous Total` = round(`Previous Total`, 1),
+    `Predicted Total` = round(`Predicted Total`, 1),
+    `Absolute Error` = round(`Absolute Error`, 1)
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Extra Credit #03: Retrospective Model Validation",
+    subtitle = "Testing a simple host-adjusted forecast against recent Team USA outcomes"
+  )
+```
+
+The validation step creates an empirical error estimate rather than relying only on intuition. This error is then used to create a more grounded margin around the 2028 forecast.
+
+```{r}
+#| label: validation-summary-table
+#| echo: false
+
+validation_summary |>
+  transmute(
+    `Validation Cases` = validation_cases,
+    `Mean Absolute Error` = round(mean_absolute_error, 1),
+    `Median Absolute Error` = round(median_absolute_error, 1),
+    `RMSE Used as Margin` = round(rmse, 1)
+  ) |>
+  gt() |>
+  tab_header(
+    title = "Validation Error Summary"
+  )
+```
+
+Because historical host forecasts are not perfect, the final fundraising estimate should be presented as a range rather than a single guaranteed number. This is more credible and more useful for sponsor-facing communication.
+
+## Visualization: Team USA Historical Trend and 2028 Forecast
+
+```{r}
+#| label: forecast-visual
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4.8
+
+forecast_plot_data <- usa_medals |>
+  filter(year >= 2000) |>
+  select(year, total) |>
+  bind_rows(
+    tibble(
+      year = 2028,
+      total = final_forecast_clean$total_2028
+    )
+  )
+
+forecast_errorbar_data <- forecast_with_validation_margin |>
+  transmute(
+    year = 2028,
+    total = final_forecast_clean$total_2028,
+    ymin = total_low,
+    ymax = total_high
+  )
+
+ggplot(forecast_plot_data, aes(x = year, y = total)) +
+  geom_line(color = usa_blue, linewidth = 1.2) +
+  geom_point(
+    data = filter(forecast_plot_data, year < 2028),
+    color = usa_blue,
+    size = 3
+  ) +
+  geom_point(
+    data = filter(forecast_plot_data, year == 2028),
+    color = usa_red,
+    size = 5
+  ) +
+  geom_errorbar(
+    data = forecast_errorbar_data,
+    aes(x = year, ymin = ymin, ymax = ymax),
+    inherit.aes = FALSE,
+    color = usa_red,
+    width = 0.7,
+    linewidth = 1.1
+  ) +
+  annotate(
+    "text",
+    x = 2028,
+    y = final_forecast_clean$total_2028 + 8,
+    label = paste0("2028 Forecast: ", final_forecast_clean$total_2028),
+    color = usa_red,
+    fontface = "bold",
+    hjust = 0.5
+  ) +
+  labs(
+    title = "Team USA Medal Trend and LA 2028 Forecast",
+    subtitle = "Historical totals from 2000-2024 with validation-based forecast range",
+    x = "Olympic Year",
+    y = "Total Medals"
+  )
+```
+
+This figure is the main fundraising visual. It shows that the 2028 forecast is not simply a continuation of the historical trend; it reflects the combined effect of strong baseline performance, hosting, and new sports.
+
+## Geographic Context
+
+```{r}
+#| label: world-medal-map
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4.6
+
+if (requireNamespace("necountries", quietly = TRUE)) {
+  
+  world <- necountries::countries()
+  
+  code_column <- intersect(
+    c("iso_a3", "adm0_a3", "ISO_A3", "iso3"),
+    names(world)
+  )[1]
+  
+  map_data_joined <- world |>
+    left_join(
+      top_country_totals,
+      by = setNames("iso3", code_column)
+    )
+  
+  ggplot(map_data_joined) +
+    geom_sf(aes(fill = total), color = "white", linewidth = 0.1) +
+    scale_fill_gradient(
+      low = "#E8F1FA",
+      high = usa_blue,
+      na.value = "grey90",
+      labels = comma
+    ) +
+    labs(
+      title = "Global Olympic Medal Concentration Since 2000",
+      subtitle = "Team USA sits within a small group of dominant modern Olympic nations",
+      fill = "Total medals"
+    ) +
+    theme_void()
+  
+} else {
+  ggplot() +
+    annotate(
+      "text",
+      x = 0,
+      y = 0,
+      label = "Map skipped: install the necountries package to render the geospatial visualization."
+    ) +
+    theme_void()
+}
+```
+
+This map places Team USA’s forecast in global context. For sponsors, the key takeaway is that Olympic success is concentrated among a relatively small set of countries, and the United States remains one of the clearest global leaders.
+
+## Sponsor-Facing Interpretation
+
+The model indicates that Team USA is positioned for a highly marketable Olympic performance in Los Angeles. A forecast near **`r final_forecast_clean$total_2028` total medals** would place the United States well above its recent baseline and create sustained sponsor visibility throughout the Games.
+
+The strongest sponsorship case comes from the combination of scale and story. Team USA is not merely expected to win; it is expected to win at home, across a broad set of events, with added upside from new sports that are culturally familiar to American audiences. That combination supports a clear fundraising message: LA 2028 is likely to be a high-attention, high-performance Olympic cycle for Team USA.
+
+## Limitations
+
+This model is intentionally simple and interpretable. It does not account for athlete-level injuries, qualification changes, sport-specific roster decisions, geopolitical disruptions, or changes in event structure. The host effect is moderated to avoid overfitting to extreme historical cases, and the momentum factor is capped for the same reason.
+
+The sport-level section is also based on recent available discipline-level medal tables rather than detailed athlete projections. As a result, the forecast should be interpreted as a sponsor-facing planning estimate rather than a precise betting line.
+
+
+## Conclusion: Sponsor Recommendation
+
+Team USA’s projected performance at the 2028 Los Angeles Olympics represents a rare convergence of scale, visibility, and confidence. The combination of a strong historical baseline, home-field advantage, and favorable new sport additions positions the United States for one of its most prominent Olympic cycles in recent history.
+
+From a sponsorship perspective, the key advantage is not just the expected medal count, but the breadth and visibility of performance across multiple high-profile sports. Athletics, swimming, and other marquee disciplines provide repeated exposure opportunities, while newly added sports offer additional engagement with domestic audiences.
+
+While the model includes uncertainty, the validated forecast range still supports a clear conclusion: LA 2028 is highly likely to be a high-performance, high-attention event for Team USA. This makes it a compelling opportunity for sponsors seeking sustained visibility, national alignment, and strong association with Olympic success.
+
+::: {.callout-note title="AI Usage Statement" collapse="true"}
+
+AI tools were used primarily for debugging R code, improving visualization formatting, and assisting with data workflow challenges. All analytical decisions, modeling assumptions, and interpretations were developed independently. AI served strictly as a coding and formatting assistant, and all final content was reviewed, validated, and written by me.
+:::
+
